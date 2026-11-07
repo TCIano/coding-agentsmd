@@ -1,0 +1,4 @@
+system_version: "{{SYSTEM_VERSION}}"
+initialized_at: "{{DATE}}"
+document_templates: "docs/_templates"
+document_map: "docs/document-map.yml"
