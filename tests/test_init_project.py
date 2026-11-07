@@ -7,6 +7,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "init_project.py"
+VERSION = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
 
 
 class InitProjectTest(unittest.TestCase):
@@ -36,7 +37,7 @@ class InitProjectTest(unittest.TestCase):
                 (target / "docs/bugs/_draft.md").read_text(),
             )
             self.assertIn(
-                'system_version: "0.1.0"',
+                f'system_version: "{VERSION}"',
                 (target / "docs/system.yml").read_text(),
             )
             self.assertTrue((target / "docs/attachments/.gitkeep").exists())

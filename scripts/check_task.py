@@ -378,7 +378,11 @@ def check_duplicate_ids(documents: list[Document], report: Report) -> None:
     for doc_id, owners in sorted(document_ids(documents).items()):
         if len(owners) > 1:
             paths = "、".join(str(document.relative) for document in owners)
-            report.error(f"文档编号重复：{doc_id} 同时出现在 {paths}。")
+            report.error(
+                f"文档 id 重复：{doc_id} 同时出现在 {paths}。"
+                "文档 id 与任务编号是两套命名空间：前者标识文档，后者标识一次任务；"
+                "related_tasks 引用的是任务编号。"
+            )
 
 
 def replaces_target_exists(
