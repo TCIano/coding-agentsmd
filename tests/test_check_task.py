@@ -472,5 +472,88 @@ updated_at: "2026-10-26"
         self.assertIn("错误：", self.output(result))
 
 
+    def test_verification_result_placeholder_is_error(self) -> None:
+        rows = ["| 集成测试 | 待填写 | abc1234 | 2026-10-26 |  |"]
+        self.write_doc("docs/tasks/TASK-001.md", task_document(verification_rows=rows))
+
+        result = self.run_check()
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 1, output)
+        self.assertIn("验证", output)
+        self.assertIn("待填写", output)
+
+    def test_verification_columns_are_read_by_header(self) -> None:
+        content = task_document().replace(
+            "| 命令或操作 | 结果 | 代码版本 | 时间 | 未运行原因与影响 |",
+            "| 命令或操作 | 代码版本 | 结果 | 时间 | 未运行原因与影响 |",
+        ).replace(
+            "| python3 -m unittest discover -s tests | 通过 | abc1234 | 2026-10-26 | 无 |",
+            "| python3 -m unittest discover -s tests | abc1234 | 待填写 | 2026-10-26 | 无 |",
+        )
+        self.write_doc("docs/tasks/TASK-001.md", content)
+
+        result = self.run_check()
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 1, output)
+        self.assertIn("待填写", output)
+
+    def test_verification_table_without_expected_header_is_error(self) -> None:
+        content = task_document().replace(
+            "| 命令或操作 | 结果 | 代码版本 | 时间 | 未运行原因与影响 |",
+            "| 命令或操作 | 结论 | 代码版本 | 时间 | 未运行原因与影响 |",
+        )
+        self.write_doc("docs/tasks/TASK-001.md", content)
+
+        result = self.run_check()
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 1, output)
+        self.assertIn("表头", output)
+        self.assertIn("结果", output)
+
+    def test_impact_table_columns_are_read_by_header(self) -> None:
+        content = task_document(
+            impact_rows=[
+                "| docs/interfaces/auth.md | [接口文档](../interfaces/auth.md) | 待填写 |",
+            ]
+        ).replace(
+            "| 文档类型或具体文件 | 结论（已更新／检查后无需更新） | 链接或无需更新的理由 |",
+            "| 文档类型或具体文件 | 链接或无需更新的理由 | 结论（已更新／检查后无需更新） |",
+        )
+        self.write_doc("docs/tasks/TASK-001.md", content)
+
+        result = self.run_check()
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 1, output)
+        self.assertIn("待填写", output)
+
+    def test_impact_table_without_expected_header_is_error(self) -> None:
+        content = task_document().replace(
+            "| 文档类型或具体文件 | 结论（已更新／检查后无需更新） | 链接或无需更新的理由 |",
+            "| 文档类型或具体文件 | 判断结果 | 链接或无需更新的理由 |",
+        )
+        self.write_doc("docs/tasks/TASK-001.md", content)
+
+        result = self.run_check()
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 1, output)
+        self.assertIn("表头", output)
+        self.assertIn("结论", output)
+
+    def test_required_field_empty_string_is_error(self) -> None:
+        self.write_doc("docs/tasks/TASK-001.md", task_document(owner=""))
+
+        result = self.run_check()
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 1, output)
+        self.assertIn("owner", output)
+        self.assertIn("空", output)
+
+
 if __name__ == "__main__":
     unittest.main()

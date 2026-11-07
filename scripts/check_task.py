@@ -29,6 +29,18 @@ ALLOWED_DOCUMENT_STATUS = {"草稿", "现行", "已取代", "已归档"}
 REQUIRED_FIELDS = ("id", "type", "title", "document_status", "owner", "updated_at")
 TASK_SECTIONS = ("改动与原因", "文档影响判断", "验证", "合并检查")
 ALLOWED_CONCLUSIONS = ("已更新", "检查后无需更新")
+IMPACT_HEADERS = (
+    "文档类型或具体文件",
+    "结论（已更新／检查后无需更新）",
+    "链接或无需更新的理由",
+)
+VERIFICATION_HEADERS = (
+    "命令或操作",
+    "结果",
+    "代码版本",
+    "时间",
+    "未运行原因与影响",
+)
 
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 LINK_RE = re.compile(r"!?\[[^\]]*\]\(([^)]*)\)")
@@ -259,6 +271,37 @@ def has_any_content(cells: list[str]) -> bool:
     return any(cell.strip() for cell in cells)
 
 
+def normalize_header(cell: str) -> str:
+    return cell.strip().replace(" ", "").replace("*", "")
+
+
+def resolve_columns(
+    document: Document,
+    header: list[str] | None,
+    expected: tuple[str, ...],
+    label: str,
+    report: Report,
+) -> dict[str, int] | None:
+    """按表头名定位列；表头缺失或列名不符时报告错误，不按列下标猜。"""
+    if header is None:
+        report.error(f"{document.relative} 的「{label}」小节缺少表格。")
+        return None
+    normalized = [normalize_header(cell) for cell in header]
+    missing = [name for name in expected if normalize_header(name) not in normalized]
+    if missing:
+        actual = " | ".join(cell.strip() for cell in header)
+        report.error(
+            f"{document.relative} 的「{label}」表头缺少列：{'、'.join(missing)}；"
+            f"实际表头：{actual}。"
+        )
+        return None
+    return {name: normalized.index(normalize_header(name)) for name in expected}
+
+
+def table_cell(row: list[str], index: int) -> str:
+    return row[index].strip() if index < len(row) else ""
+
+
 def strip_fenced_code(text: str) -> str:
     output: list[str] = []
     in_fence = False
@@ -372,6 +415,15 @@ def check_document_fields(
         report.error(
             f"{document.relative} 缺少必需字段：{'、'.join(missing)}。"
         )
+    empty = [
+        name
+        for name in REQUIRED_FIELDS
+        if name in document.meta and not document.text(name).strip()
+    ]
+    if empty:
+        report.error(
+            f"{document.relative} 的必需字段为空：{'、'.join(empty)}。"
+        )
 
     if "document_status" in document.meta:
         status = document.text("document_status").strip()
@@ -402,8 +454,6 @@ def check_document_fields(
                 f"{updated_at or '（空）'}。"
             )
 
-    if "title" in document.meta and not document.text("title").strip():
-        report.error(f"{document.relative} 的 title 为空。")
 
 
 def extract_link_target(raw: str) -> str:
@@ -444,15 +494,22 @@ def check_local_links(document: Document, project: Path, report: Report) -> None
 
 
 def check_impact_table(document: Document, lines: list[str], report: Report) -> None:
-    _header, rows = parse_table(lines)
+    header, rows = parse_table(lines)
     data_rows = [row for row in rows if has_any_content(row)]
     if not data_rows:
         report.error(f"{document.relative} 的「文档影响判断」表无数据行。")
         return
+    columns = resolve_columns(
+        document, header, IMPACT_HEADERS, "文档影响判断", report
+    )
+    if columns is None:
+        return
+    conclusion_index = columns[IMPACT_HEADERS[1]]
+    reason_index = columns[IMPACT_HEADERS[2]]
     for row in data_rows:
-        conclusion = row[1].strip() if len(row) > 1 else ""
-        reason = row[2].strip() if len(row) > 2 else ""
-        if conclusion == "待填写" or not conclusion:
+        conclusion = table_cell(row, conclusion_index)
+        reason = table_cell(row, reason_index)
+        if conclusion in ("待填写", ""):
             report.error(
                 f"{document.relative} 的「文档影响判断」仍为“待填写”。"
             )
@@ -471,7 +528,7 @@ def check_impact_table(document: Document, lines: list[str], report: Report) -> 
 def check_verification_table(
     document: Document, lines: list[str], report: Report
 ) -> None:
-    _header, rows = parse_table(lines)
+    header, rows = parse_table(lines)
     data_rows = [
         row
         for row in rows
@@ -480,9 +537,22 @@ def check_verification_table(
     if not data_rows:
         report.error(f"{document.relative} 的「验证」表无数据行。")
         return
+    columns = resolve_columns(
+        document, header, VERIFICATION_HEADERS, "验证", report
+    )
+    if columns is None:
+        return
+    result_index = columns["结果"]
+    reason_index = columns["未运行原因与影响"]
     for row in data_rows:
-        result = row[1].strip() if len(row) > 1 else ""
-        reason = row[4].strip() if len(row) > 4 else ""
+        result = table_cell(row, result_index)
+        reason = table_cell(row, reason_index)
+        if result in ("", "待填写"):
+            report.error(
+                f"{document.relative} 的「验证」表结果仍为“待填写”，"
+                "不能作为验证已完成或未完成的依据。"
+            )
+            continue
         if "待运行" in result and reason in ("", "待填写"):
             report.warning(
                 f"{document.relative} 的验证结果“{result or '待运行'}”未写未运行原因与影响。"
