@@ -613,14 +613,81 @@ def check_task_change_content(document: Document, report: Report) -> None:
 # ---------------------------------------------------------------------------
 
 
-def parse_document_map(text: str) -> tuple[list[str], bool]:
-    """尽量解析 document-map.yml，返回 (docs 路径列表, 是否无法解析)。"""
-    docs_paths: list[str] = []
+@dataclass(frozen=True)
+class DocumentArea:
+    """document-map.yml 中的一个代码区域及其相关正式文档。"""
+
+    path: str
+    docs: tuple[str, ...]
+
+
+GLOB_CHARS = ("*", "?")
+
+
+def looks_like_glob(pattern: str) -> bool:
+    return any(char in pattern for char in GLOB_CHARS)
+
+
+def glob_to_regex(pattern: str) -> str:
+    """把 glob 转成正则：* 只在一段路径内，** 跨目录，? 是一个字符。"""
+    parts: list[str] = []
+    index = 0
+    while index < len(pattern):
+        char = pattern[index]
+        if char == "*":
+            if index + 1 < len(pattern) and pattern[index + 1] == "*":
+                index += 2
+                if index < len(pattern) and pattern[index] == "/":
+                    parts.append("(?:.*/)?")
+                    index += 1
+                else:
+                    parts.append(".*")
+                continue
+            parts.append("[^/]*")
+        elif char == "?":
+            parts.append("[^/]")
+        else:
+            parts.append(re.escape(char))
+        index += 1
+    return "".join(parts)
+
+
+def normalize_map_path(value: str) -> str:
+    """统一成项目相对的 posix 路径，去掉开头的 ./ 和结尾的 /。"""
+    path = value.strip().replace("\\", "/")
+    while path.startswith("./"):
+        path = path[2:]
+    return path.rstrip("/")
+
+
+def area_matches(area_path: str, changed_path: str) -> bool:
+    """目录按前缀匹配，glob 按通配匹配。"""
+    pattern = normalize_map_path(area_path)
+    changed = normalize_map_path(changed_path)
+    if not pattern or not changed:
+        return False
+    if looks_like_glob(pattern):
+        return re.fullmatch(glob_to_regex(pattern), changed) is not None
+    return changed == pattern or changed.startswith(pattern + "/")
+
+
+def parse_document_map(text: str) -> tuple[list[DocumentArea], bool]:
+    """尽量解析 document-map.yml 的 areas 块，返回 (区域列表, 是否无法解析)。"""
     lines = text.splitlines()
     in_areas = False
     areas_indent = 0
+    item_indent: int | None = None
     docs_indent: int | None = None
     malformed = False
+    areas: list[DocumentArea] = []
+    current_path = ""
+    current_docs: list[str] = []
+
+    def flush() -> None:
+        nonlocal current_path, current_docs
+        if current_path or current_docs:
+            areas.append(DocumentArea(current_path, tuple(current_docs)))
+        current_path, current_docs = "", []
 
     for raw in lines:
         line = raw.rstrip()
@@ -643,71 +710,170 @@ def parse_document_map(text: str) -> tuple[list[str], bool]:
                 return [], True
             continue
 
-        if indent <= areas_indent and not stripped.startswith("-"):
+        if stripped.startswith("- ") and (item_indent is None or indent == item_indent):
+            flush()
+            item_indent = indent
+            indent += 2
+            stripped = stripped[2:].strip()
+        elif item_indent is None:
+            malformed = True
+            continue
+        elif indent <= item_indent:
             break
 
         if docs_indent is not None:
-            if indent > docs_indent and stripped.startswith("- "):
+            # 列表项可以比 docs: 深一层，也可以和它同缩进。
+            if indent >= docs_indent and stripped.startswith("- "):
                 item = unquote_value(strip_yaml_comment(stripped[2:]))
                 if item:
-                    docs_paths.append(item)
+                    current_docs.append(item)
                 continue
             docs_indent = None
 
-        match = re.match(r"^\s*(?:-\s+)?docs:\s*(.*)$", line)
+        match = re.match(r"^-?\s*path:\s*(.*)$", stripped)
+        if match:
+            value = unquote_value(strip_yaml_comment(match.group(1).strip()))
+            if not value:
+                malformed = True
+            current_path = value
+            continue
+
+        match = re.match(r"^-?\s*docs:\s*(.*)$", stripped)
         if not match:
-            if re.match(r"^\s*(?:-\s+)?docs\s*\{", line):
+            if re.match(r"^-?\s*docs\s*\{", stripped):
                 malformed = True
             continue
         rest = unquote_value(strip_yaml_comment(match.group(1).strip()))
         if not rest:
             docs_indent = indent
             continue
-        if rest.startswith("{") or rest.startswith("["):
-            if rest.startswith("[") and rest.endswith("]"):
-                inner = rest[1:-1].strip()
-                if inner:
-                    for item in inner.split(","):
-                        item = unquote_value(item)
-                        if item:
-                            docs_paths.append(item)
-                continue
+        if rest.startswith("{"):
             malformed = True
             continue
-        docs_paths.append(rest)
+        if rest.startswith("[") and rest.endswith("]"):
+            inner = rest[1:-1].strip()
+            if inner:
+                for item in inner.split(","):
+                    item = unquote_value(item)
+                    if item:
+                        current_docs.append(item)
+            continue
+        current_docs.append(rest)
 
-    return docs_paths, malformed
+    if in_areas:
+        flush()
+    return areas, malformed
 
 
-def check_document_map(project: Path, report: Report) -> None:
+def check_document_map(project: Path, report: Report) -> list[DocumentArea] | None:
+    """检查对应表里登记的文档是否存在，返回解析出的区域。
+
+    对应表缺失时返回空列表；读不了或解析失败时返回 None，调用方据此跳过提示。
+    """
     map_file = project / "docs/document-map.yml"
     if not map_file.exists():
-        return
+        return []
     try:
         text = map_file.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         report.warning(f"无法读取 docs/document-map.yml：{exc}；已跳过。")
-        return
+        return None
 
-    docs_paths, malformed = parse_document_map(text)
+    areas, malformed = parse_document_map(text)
     if malformed:
         report.warning(
             "docs/document-map.yml 的 areas 结构无法解析，已跳过文档对应关系检查。"
         )
-        return
+        return None
 
     seen: set[str] = set()
-    for entry in docs_paths:
-        entry = entry.strip()
-        if not entry or "{{" in entry or entry in seen:
+    for area in areas:
+        for entry in area.docs:
+            entry = entry.strip()
+            if not entry or "{{" in entry or entry in seen:
+                continue
+            seen.add(entry)
+            target = project / entry.lstrip("/")
+            if not target.exists():
+                report.warning(
+                    f"docs/document-map.yml 记录的文档不存在：{entry}；"
+                    "如为占位内容请忽略。"
+                )
+    return areas
+
+
+def changed_files(project: Path, revision: str) -> list[str]:
+    """取相对某个 Git 版本的改动文件，含未跟踪文件。"""
+    git = shutil.which("git")
+    if not git:
+        raise UsageError("未找到 git 命令，无法比较改动。")
+    verify = subprocess.run(
+        [git, "-C", str(project), "rev-parse", "--verify", "--quiet", f"{revision}^{{commit}}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if verify.returncode != 0:
+        raise UsageError(f"无法识别 Git 版本：{revision}")
+
+    def run(*arguments: str) -> str:
+        result = subprocess.run(
+            [git, "-c", "core.quotepath=off", "-C", str(project), *arguments],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            message = result.stderr.strip() or result.stdout.strip()
+            raise UsageError(f"git {' '.join(arguments)} 失败：{message}")
+        return result.stdout
+
+    names: set[str] = set()
+    for output in (
+        run("diff", "--name-only", revision, "--"),
+        run("ls-files", "--others", "--exclude-standard"),
+    ):
+        for line in output.splitlines():
+            line = line.strip()
+            if line:
+                names.add(line)
+    return sorted(names)
+
+
+def hint_affected_documents(
+    project: Path,
+    revision: str,
+    areas: list[DocumentArea],
+    report: Report,
+) -> None:
+    """按对应表提示改动可能影响哪些文档；只提示，不判定。"""
+    changed = changed_files(project, revision)
+    covered: set[str] = set()
+    for area in areas:
+        if not area.path:
             continue
-        seen.add(entry)
-        target = project / entry.lstrip("/")
-        if not target.exists():
-            report.warning(
-                f"docs/document-map.yml 记录的文档不存在：{entry}；"
-                "如为占位内容请忽略。"
-            )
+        hits = [path for path in changed if area_matches(area.path, path)]
+        if not hits:
+            continue
+        covered.update(hits)
+        docs = [
+            document
+            for document in dict.fromkeys(area.docs)
+            if document and "{{" not in document
+        ]
+        if not docs:
+            report.warning(f"改动命中区域 {area.path}，但该区域没有登记文档。")
+            continue
+        report.warning(
+            f"改动命中区域 {area.path}，可能影响文档：{'、'.join(docs)}。"
+        )
+    unregistered = [path for path in changed if path not in covered]
+    if unregistered:
+        report.warning(
+            "改动的文件未登记在 docs/document-map.yml 的区域中，建议补充 path 与 docs："
+            + "、".join(unregistered)
+            + "。"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -776,7 +942,12 @@ def check_custom_types(documents: list[Document], report: Report) -> None:
         )
 
 
-def run_checks(project: Path, task_id: str | None, report: Report) -> None:
+def run_checks(
+    project: Path,
+    task_id: str | None,
+    report: Report,
+    changed_from: str | None = None,
+) -> None:
     check_version(project, report)
     documents = scan_documents(project, report)
     all_ids = document_ids(documents)
@@ -804,7 +975,9 @@ def run_checks(project: Path, task_id: str | None, report: Report) -> None:
         for document in records:
             check_task_change_content(document, report)
 
-    check_document_map(project, report)
+    areas = check_document_map(project, report)
+    if changed_from and areas is not None:
+        hint_affected_documents(project, changed_from, areas, report)
 
 
 def print_report(report: Report, scope: str) -> int:
@@ -833,6 +1006,12 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="任务编号，例如 TASK-001；省略时检查全部正式文档",
     )
+    parser.add_argument(
+        "--changed-from",
+        metavar="REV",
+        default=None,
+        help="相对某个 Git 版本（如 HEAD）列出改动可能影响的文档",
+    )
     args = parser.parse_args(argv)
 
     if args.task_id is not None and not args.task_id.strip():
@@ -846,7 +1025,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     report = Report()
-    run_checks(project, task_id, report)
+    try:
+        run_checks(project, task_id, report, args.changed_from)
+    except UsageError as exc:
+        print(f"错误：{exc}")
+        return 2
     scope = f"任务 {task_id} " if task_id else "全部文档"
     return print_report(report, scope)
 

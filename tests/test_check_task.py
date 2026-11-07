@@ -160,13 +160,33 @@ class CheckTaskTest(unittest.TestCase):
             check=False,
         )
 
-    def run_full(self) -> subprocess.CompletedProcess[str]:
+    def run_full(self, *arguments: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [sys.executable, str(CHECK), str(self.project)],
+            [sys.executable, str(CHECK), str(self.project), *arguments],
             capture_output=True,
             text=True,
             check=False,
         )
+
+    def commit_all(self, message: str = "checkpoint") -> None:
+        for arguments in (
+            ["add", "-A"],
+            [
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "user.name=test",
+                "commit",
+                "-q",
+                "-m",
+                message,
+            ],
+        ):
+            subprocess.run(
+                ["git", "-C", str(self.project), *arguments],
+                check=True,
+                capture_output=True,
+            )
 
     def output(self, result: subprocess.CompletedProcess[str]) -> str:
         return result.stdout + result.stderr
@@ -454,8 +474,9 @@ updated_at: "2026-10-26"
 
         output = self.output(result)
         self.assertEqual(result.returncode, 0, output)
-        self.assertIn("警告：", output)
-        self.assertIn("document-map", output)
+        self.assertIn("无法解析", output)
+        self.assertNotIn("可能影响文档", output)
+        self.assertNotIn("未登记", output)
         self.assertNotIn("错误：", output)
 
     def test_missing_task_section_is_error(self) -> None:
@@ -653,6 +674,198 @@ updated_at: "2026-10-26"
         self.assertIn("owner", output)
         self.assertIn("空", output)
 
+
+
+    def test_changed_from_hints_directory_area(self) -> None:
+        tracked = self.project / "src/login/app.py"
+        tracked.parent.mkdir(parents=True)
+        tracked.write_text("value = 1\n", encoding="utf-8")
+        self.write_doc(
+            "docs/document-map.yml",
+            "areas:\n  - path: src/login\n    docs:\n      - docs/interfaces/auth.md\n",
+        )
+        self.commit_all()
+        tracked.write_text("value = 2\n", encoding="utf-8")
+
+        result = self.run_full("--changed-from", "HEAD")
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("可能影响文档", output)
+        self.assertIn("docs/interfaces/auth.md", output)
+        self.assertIn("src/login", output)
+
+    def test_changed_from_hints_glob_area(self) -> None:
+        tracked = self.project / "src/core/logic.py"
+        tracked.parent.mkdir(parents=True)
+        tracked.write_text("value = 1\n", encoding="utf-8")
+        self.write_doc(
+            "docs/document-map.yml",
+            "areas:\n  - path: \"src/**/*.py\"\n    docs:\n      - docs/interfaces/auth.md\n",
+        )
+        self.commit_all()
+        tracked.write_text("value = 2\n", encoding="utf-8")
+
+        result = self.run_full("--changed-from", "HEAD")
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("可能影响文档", output)
+        self.assertIn("src/**/*.py", output)
+
+    def test_changed_from_reports_unregistered_change(self) -> None:
+        tracked = self.project / "src/login/app.py"
+        tracked.parent.mkdir(parents=True)
+        tracked.write_text("value = 1\n", encoding="utf-8")
+        self.write_doc(
+            "docs/document-map.yml",
+            "areas:\n  - path: src/login\n    docs:\n      - docs/interfaces/auth.md\n",
+        )
+        self.commit_all()
+        untracked = self.project / "src/other/new.py"
+        untracked.parent.mkdir(parents=True)
+        untracked.write_text("new = True\n", encoding="utf-8")
+
+        result = self.run_full("--changed-from", "HEAD")
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("未登记", output)
+        self.assertIn("src/other/new.py", output)
+
+    def test_directory_area_does_not_match_sibling_prefix(self) -> None:
+        tracked = self.project / "src/login/app.py"
+        tracked.parent.mkdir(parents=True)
+        tracked.write_text("value = 1\n", encoding="utf-8")
+        self.write_doc(
+            "docs/document-map.yml",
+            "areas:\n  - path: src/login\n    docs:\n      - docs/interfaces/auth.md\n",
+        )
+        self.commit_all()
+        sibling = self.project / "src/login2/extra.py"
+        sibling.parent.mkdir(parents=True)
+        sibling.write_text("extra = 1\n", encoding="utf-8")
+
+        result = self.run_full("--changed-from", "HEAD")
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 0, output)
+        self.assertNotIn("可能影响文档", output)
+        self.assertIn("未登记", output)
+
+    def test_without_changed_from_no_hints(self) -> None:
+        tracked = self.project / "src/login/app.py"
+        tracked.parent.mkdir(parents=True)
+        tracked.write_text("value = 1\n", encoding="utf-8")
+        self.write_doc(
+            "docs/document-map.yml",
+            "areas:\n  - path: src/login\n    docs:\n      - docs/interfaces/auth.md\n",
+        )
+        self.commit_all()
+        tracked.write_text("value = 2\n", encoding="utf-8")
+
+        result = self.run_full()
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 0, output)
+        self.assertNotIn("可能影响文档", output)
+        self.assertNotIn("未登记", output)
+
+    def test_changed_from_clean_tree_has_no_hints(self) -> None:
+        self.write_doc(
+            "docs/document-map.yml",
+            "areas:\n  - path: src/login\n    docs:\n      - docs/interfaces/auth.md\n",
+        )
+        self.commit_all()
+
+        result = self.run_full("--changed-from", "HEAD")
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 0, output)
+        self.assertNotIn("可能影响文档", output)
+        self.assertNotIn("未登记", output)
+
+    def test_malformed_document_map_warns_with_changed_from(self) -> None:
+        self.commit_all()
+        untracked = self.project / "src/login/app.py"
+        untracked.parent.mkdir(parents=True)
+        untracked.write_text("value = 1\n", encoding="utf-8")
+        self.write_doc(
+            "docs/document-map.yml",
+            "areas: {path: src/login, docs: [docs/interfaces/auth.md]}\n",
+        )
+
+        result = self.run_full("--changed-from", "HEAD")
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("无法解析", output)
+        self.assertNotIn("可能影响文档", output)
+        self.assertNotIn("未登记", output)
+        self.assertNotIn("错误：", output)
+
+    def test_unknown_revision_exits_2(self) -> None:
+        self.commit_all()
+
+        result = self.run_full("--changed-from", "no-such-revision")
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 2, output)
+        self.assertIn("版本", output)
+
+    def test_docs_list_same_indent_parses(self) -> None:
+        tracked = self.project / "src/login/app.py"
+        tracked.parent.mkdir(parents=True)
+        tracked.write_text("value = 1\n", encoding="utf-8")
+        self.write_doc(
+            "docs/document-map.yml",
+            "areas:\n  - path: src/login\n    docs:\n    - docs/interfaces/auth.md\n",
+        )
+        self.commit_all()
+        tracked.write_text("value = 2\n", encoding="utf-8")
+
+        result = self.run_full("--changed-from", "HEAD")
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("可能影响文档", output)
+        self.assertIn("docs/interfaces/auth.md", output)
+
+    def test_single_star_does_not_cross_directories(self) -> None:
+        tracked = self.project / "src/auth/login.py"
+        tracked.parent.mkdir(parents=True)
+        tracked.write_text("value = 1\n", encoding="utf-8")
+        self.write_doc(
+            "docs/document-map.yml",
+            "areas:\n  - path: src/*.py\n    docs:\n      - docs/interfaces/auth.md\n",
+        )
+        self.commit_all()
+        tracked.write_text("value = 2\n", encoding="utf-8")
+
+        result = self.run_full("--changed-from", "HEAD")
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 0, output)
+        self.assertNotIn("可能影响文档", output)
+        self.assertIn("未登记", output)
+
+    def test_double_star_crosses_directories(self) -> None:
+        tracked = self.project / "src/auth/login.py"
+        tracked.parent.mkdir(parents=True)
+        tracked.write_text("value = 1\n", encoding="utf-8")
+        self.write_doc(
+            "docs/document-map.yml",
+            "areas:\n  - path: src/**\n    docs:\n      - docs/interfaces/auth.md\n",
+        )
+        self.commit_all()
+        tracked.write_text("value = 2\n", encoding="utf-8")
+
+        result = self.run_full("--changed-from", "HEAD")
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("可能影响文档", output)
+        self.assertNotIn("未登记", output)
 
 if __name__ == "__main__":
     unittest.main()
