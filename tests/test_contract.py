@@ -1,4 +1,4 @@
-"""锁定框架、模板与检查器之间的契约，防止三处各改一处、对不上。"""
+"""锁定框架、模板、类型表和检查器之间的契约，防止各改一处、对不上。"""
 
 from __future__ import annotations
 
@@ -26,8 +26,14 @@ def load_module(name: str, path: Path):
     return module
 
 
-CHECK = load_module("check_task_contract", ROOT / "scripts" / "check_task.py")
-INIT = load_module("init_project_contract", ROOT / "scripts" / "init_project.py")
+SCRIPTS = ROOT / "scripts"
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+
+# 先按真实名字加载 doc_types，两个脚本 from doc_types import ... 时复用同一个模块。
+DOC_TYPES = load_module("doc_types", SCRIPTS / "doc_types.py")
+CHECK = load_module("check_task_contract", SCRIPTS / "check_task.py")
+INIT = load_module("init_project_contract", SCRIPTS / "init_project.py")
 
 
 def template_files() -> list[Path]:
@@ -177,6 +183,54 @@ class FrameworkMappingContractTest(unittest.TestCase):
                 relative,
                 f"模板 {relative} 的 type“{doc_type}”在映射表中指向了别的文件。",
             )
+
+
+
+class DocTypesContractTest(unittest.TestCase):
+    """scripts/doc_types.py 是类型声明的唯一出处。"""
+
+    def test_type_values_are_unique(self) -> None:
+        values = [spec.type for spec in DOC_TYPES.DOC_TYPES]
+        self.assertEqual(len(values), len(set(values)), "type 值有重复。")
+
+    def test_type_names_are_unique(self) -> None:
+        names = [spec.name for spec in DOC_TYPES.DOC_TYPES]
+        self.assertEqual(len(names), len(set(names)), "中文类型名有重复。")
+
+    def test_every_type_has_template_file(self) -> None:
+        for spec in DOC_TYPES.DOC_TYPES:
+            self.assertTrue(
+                (ROOT / spec.template).is_file(),
+                f"{spec.name} 的模板文件不存在：{spec.template}",
+            )
+
+    def test_starter_entries_are_docs_relative(self) -> None:
+        for spec in DOC_TYPES.DOC_TYPES:
+            if spec.starter is None:
+                self.assertIsNone(
+                    spec.starter_label,
+                    f"{spec.name} 没有起始草稿却有草稿标签。",
+                )
+                continue
+            starter = Path(spec.starter)
+            self.assertFalse(starter.is_absolute(), f"{spec.name} 的草稿路径是绝对路径。")
+            self.assertNotIn("..", starter.parts, f"{spec.name} 的草稿路径跳出 docs/。")
+            self.assertTrue(spec.starter_label, f"{spec.name} 缺少草稿标签。")
+
+    def test_checker_and_init_share_the_table(self) -> None:
+        table_types = {spec.type for spec in DOC_TYPES.DOC_TYPES}
+        self.assertEqual(set(CHECK.BUILTIN_TYPES), table_types)
+        self.assertEqual(INIT.STARTERS, DOC_TYPES.STARTERS)
+
+    def test_framework_table_matches_table(self) -> None:
+        expected = [
+            [spec.name, spec.type, spec.template] for spec in DOC_TYPES.DOC_TYPES
+        ]
+        self.assertEqual(
+            framework_mapping_rows(),
+            expected,
+            "docs/framework.md 的类型表与 scripts/doc_types.py 不一致。",
+        )
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-# AI 项目维护文档系统：框架 v0.2.0
+# AI 项目维护文档系统：框架 v0.3.0
 
 状态：2026-10-26 已确认，后续可修订。本文描述系统约定；当前实现与尚未实现的部分见「工具边界」。
 
@@ -20,7 +20,7 @@ templates/
 
 初始化一个项目时，工具把基础文件放到该项目根目录，同时把本次采用的文档模板复制到该项目的 `docs/_templates/`，形成项目模板副本，并在 `docs/system.yml` 记录模板版本。以后新建文档时，从项目自己的 `docs/_templates/` 生成；升级时与系统模板的新版本比较。这样项目离开这套工具也能看到自己正在使用的模板。
 
-当前可运行的入口是 `scripts/init_project.py`（初始化）、`scripts/check_task.py`（检查当前任务）和 `scripts/upgrade_templates.py`（查看模板升级差异），用法见根目录 `README.md`。快照生成和现有文档检查尚未实现，完整缺口见「工具边界」。
+当前可运行的入口是 `scripts/init_project.py`（初始化）、`scripts/check_task.py`（检查全部文档或某个任务）和 `scripts/upgrade_templates.py`（查看模板升级差异），用法见根目录 `README.md`。快照生成尚未实现，完整缺口见「工具边界」。
 
 ## 接入项目的最小结构
 
@@ -63,7 +63,7 @@ docs/
 
 ### 类型标识与模板
 
-中文类型名、frontmatter 的 `type` 值和模板文件必须一一对应；下表是这一对应关系的唯一出处，模板 frontmatter 和检查脚本的 `type` 值都应与它一致。项目自定义类型不在表中，须在项目内声明模板、存放位置和检查规则（当前工具只给警告）。
+中文类型名、frontmatter 的 `type` 值和模板文件必须一一对应；下表列出当前对应关系，模板 frontmatter 和检查脚本的 `type` 值都应与 `scripts/doc_types.py` 一致。项目自定义类型不在表中，须在项目内声明模板、存放位置和检查规则（当前工具只给警告）。
 
 | 中文类型名 | `type` 值 | 模板文件 |
 | --- | --- | --- |
@@ -75,6 +75,8 @@ docs/
 | 工作接续快照 | `work-snapshot` | `templates/documents/work-snapshot.md` |
 | 项目状态快照 | `project-snapshot` | `templates/documents/project-snapshot.md` |
 | 项目变更记录 | `project-changelog` | `templates/project/docs/CHANGELOG.md` |
+
+这张表以 `scripts/doc_types.py` 为准，契约测试锁死。新增或修改类型要同步三处：`scripts/doc_types.py`、模板文件（按表中路径）和这张表；两个脚本不用改。
 
 项目变更记录目前由项目基础文件提供，不在 `docs/_templates/` 中；初始化时写入 `docs/CHANGELOG.md`。
 
@@ -124,12 +126,11 @@ docs/
 
 不同 AI 工具以 `AGENTS.md` 和 `docs/` 为共同依据。系统按需生成只指向 `AGENTS.md` 的工具专用入口文件，项目仅启用实际使用的工具。工具专用入口不复制长期规则。
 
-当前实现（0.2.0）：`scripts/init_project.py` 初始化项目；`scripts/check_task.py <项目> <任务编号>` 只读检查任务变更记录、任务相关文档的必填字段、文档状态和本地链接、文档影响判断表、验证表、模板版本差异及 `document-map.yml` 中登记的文档存在性，发现错误退出 1，环境或用法错误退出 2，版本较旧只警告；`scripts/upgrade_templates.py <项目> [--check]` 只读展示项目 `docs/_templates/` 与系统模板的差异，不覆盖项目内容，`--check` 在有差异或缺失时退出 1，版本较旧本身不构成失败。
+当前实现（0.3.0）：`scripts/init_project.py` 初始化项目；`scripts/check_task.py <项目> [任务号]` 只读检查正式文档：不带任务号时检查全部正式文档的必填字段、空串、文档状态、本地链接、重复 id、类型和 `document-map.yml`，并提示模板版本差异；带任务号时在此基础上检查该任务的任务变更记录、文档影响判断表、验证表和合并检查小节。发现错误退出 1，环境或用法错误退出 2，版本较旧只警告；`scripts/upgrade_templates.py <项目> [--check]` 只读展示项目 `docs/_templates/` 与系统模板的差异，不覆盖项目内容，`--check` 在有差异或缺失时退出 1，版本较旧本身不构成失败。
 
 尚未实现或仅部分实现的项：
 
 - 快照生成。
-- 现有文档检查：对项目内全部正式文档做字段、链接和状态体检；当前只检查与任务相关的文档。
 - 快照类字段校验（`generated_at`、`verified_at`、`code_revision`、`task_status`）。
 - 按类型的正文必填内容；当前只校验任务变更记录的四个小节。
 - 敏感信息扫描。
@@ -156,6 +157,17 @@ docs/
 另外，项目变更记录模板补充了 `id` 字段；既有项目可自行补上，不影响当前检查。
 
 检查器的变化只影响检查结果，不改写项目文件；模板变化只影响之后新初始化的项目。
+
+### 0.3.0 迁移影响
+
+0.3.0 增加全量检查，并收紧了扫描规则：
+
+1. `scripts/check_task.py <项目>` 不带任务号时执行全量检查：正式文档的必填字段、空串、本地链接、文档状态、重复 id、类型和 `document-map.yml`；带任务号时保留任务记录检查。
+2. 正式文档缺少 frontmatter 会报错；起始草稿和模板副本仍按原有规则跳过，`docs/index.md` 作为索引页显式豁免。
+3. 字段和链接检查现在覆盖全部正式文档，不再只查任务相关文档。
+4. 升级前先跑一遍全量检查，清掉上述问题，再把 `docs/system.yml` 的 `system_version` 更新为 `0.3.0`。
+
+全量检查只读，不改写项目文件。
 
 ## 场景检查：修复登录缺陷并修改接口
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""检查接入项目中某个任务的文档记录是否完整。"""
+"""检查接入项目的正式文档，或只检查某个任务的记录。"""
 
 from __future__ import annotations
 
@@ -15,16 +15,11 @@ from urllib.parse import unquote
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-BUILTIN_TYPES = {
-    "requirement",
-    "bug",
-    "interface",
-    "adr",
-    "task-change",
-    "work-snapshot",
-    "project-snapshot",
-    "project-changelog",
-}
+if str(REPO_ROOT / "scripts") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "scripts"))
+
+from doc_types import BUILTIN_TYPES  # noqa: E402
+
 ALLOWED_DOCUMENT_STATUS = {"草稿", "现行", "已取代", "已归档"}
 REQUIRED_FIELDS = ("id", "type", "title", "document_status", "owner", "updated_at")
 TASK_SECTIONS = ("改动与原因", "文档影响判断", "验证", "合并检查")
@@ -187,6 +182,9 @@ def is_scan_candidate(path: Path, docs_dir: Path) -> bool:
     relative = path.relative_to(docs_dir)
     if "_templates" in relative.parts or "drafts" in relative.parts:
         return False
+    # docs/index.md 是文档索引页，不是正式文档，不要求 frontmatter。
+    if relative == Path("index.md"):
+        return False
     return not path.name.startswith("_")
 
 
@@ -196,16 +194,23 @@ def scan_documents(project: Path, report: Report) -> list[Document]:
     for path in sorted(docs_dir.rglob("*.md")):
         if not is_scan_candidate(path, docs_dir):
             continue
+        relative = path.relative_to(project)
         try:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:
-            report.warning(f"无法读取 {path.relative_to(project)}：{exc}；已跳过。")
+            report.warning(f"无法读取 {relative}：{exc}；已跳过。")
             continue
         meta, body = parse_frontmatter(text)
+        if not meta:
+            report.error(
+                f"{relative} 缺少 frontmatter（开头用 --- 包裹的字段块），"
+                "不能作为正式文档。"
+            )
+            continue
         documents.append(
             Document(
                 path=path,
-                relative=path.relative_to(project),
+                relative=relative,
                 meta=meta,
                 body=body,
             )
@@ -771,7 +776,7 @@ def check_custom_types(documents: list[Document], report: Report) -> None:
         )
 
 
-def run_checks(project: Path, task_id: str, report: Report) -> None:
+def run_checks(project: Path, task_id: str | None, report: Report) -> None:
     check_version(project, report)
     documents = scan_documents(project, report)
     all_ids = document_ids(documents)
@@ -779,57 +784,61 @@ def run_checks(project: Path, task_id: str, report: Report) -> None:
     check_duplicate_ids(documents, report)
     check_custom_types(documents, report)
 
-    records = [
-        document
-        for document in documents
-        if document.text("type").strip() == "task-change"
-        and is_task_related(document, task_id)
-    ]
-    if not records:
-        report.error(
-            f"未找到任务 {task_id} 的任务变更记录：需要 type 为 task-change，"
-            f"且 id 为 {task_id} 或 related_tasks 含 {task_id} 的文档。"
-        )
-
-    related_documents = [
-        document for document in documents if is_task_related(document, task_id)
-    ]
-    for document in related_documents:
+    # 字段和链接对所有正式文档生效，不只对任务相关文档生效。
+    for document in documents:
         check_document_fields(document, project, all_ids, report)
         check_local_links(document, project, report)
 
-    for document in records:
-        check_task_change_content(document, report)
+    if task_id is not None:
+        records = [
+            document
+            for document in documents
+            if document.text("type").strip() == "task-change"
+            and is_task_related(document, task_id)
+        ]
+        if not records:
+            report.error(
+                f"未找到任务 {task_id} 的任务变更记录：需要 type 为 task-change，"
+                f"且 id 为 {task_id} 或 related_tasks 含 {task_id} 的文档。"
+            )
+        for document in records:
+            check_task_change_content(document, report)
 
     check_document_map(project, report)
 
 
-def print_report(report: Report, task_id: str) -> int:
+def print_report(report: Report, scope: str) -> int:
     for message in report.errors:
         print(f"错误：{message}")
     for message in report.warnings:
         print(f"警告：{message}")
     if report.errors:
         print(
-            f"错误：任务 {task_id} 检查未通过，"
+            f"错误：{scope}检查未通过，"
             f"共 {len(report.errors)} 个错误、{len(report.warnings)} 个警告。"
         )
         return 1
-    print(f"通过：任务 {task_id} 检查通过，无错误（{len(report.warnings)} 个警告）。")
+    print(f"通过：{scope}检查通过，无错误（{len(report.warnings)} 个警告）。")
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = ChineseArgumentParser(
-        description="检查接入项目中当前任务的文档记录。"
+        description="检查接入项目的正式文档，或只检查某个任务的记录。"
     )
     parser.add_argument("project", type=Path, help="接入项目的根目录")
-    parser.add_argument("task_id", help="任务编号，例如 TASK-001")
+    parser.add_argument(
+        "task_id",
+        nargs="?",
+        default=None,
+        help="任务编号，例如 TASK-001；省略时检查全部正式文档",
+    )
     args = parser.parse_args(argv)
 
-    if not args.task_id.strip():
+    if args.task_id is not None and not args.task_id.strip():
         print("错误：任务编号不能为空。")
         return 2
+    task_id = args.task_id.strip() if args.task_id is not None else None
     try:
         project = prepare_project(args.project)
     except UsageError as exc:
@@ -837,8 +846,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     report = Report()
-    run_checks(project, args.task_id.strip(), report)
-    return print_report(report, args.task_id.strip())
+    run_checks(project, task_id, report)
+    scope = f"任务 {task_id} " if task_id else "全部文档"
+    return print_report(report, scope)
 
 
 if __name__ == "__main__":

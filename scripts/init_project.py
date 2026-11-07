@@ -15,15 +15,10 @@ BASE = ROOT / "templates" / "project"
 DOCUMENTS = ROOT / "templates" / "documents"
 VERSION = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
 
-STARTERS = {
-    "requirement.md": ("requirements/_draft.md", "需求"),
-    "bug.md": ("bugs/_draft.md", "缺陷"),
-    "interface.md": ("interfaces/_draft.md", "接口"),
-    "adr.md": ("adr/_draft.md", "设计决定"),
-    "task-change.md": ("tasks/_task-change-draft.md", "任务变更记录"),
-    "work-snapshot.md": ("tasks/_work-snapshot-draft.md", "工作接续快照"),
-    "project-snapshot.md": ("snapshots/_draft.md", "项目状态快照"),
-}
+if str(ROOT / "scripts") not in sys.path:
+    sys.path.insert(0, str(ROOT / "scripts"))
+
+from doc_types import DOC_TYPES, STARTERS  # noqa: E402
 
 
 def git_root(target: Path) -> Path | None:
@@ -57,17 +52,21 @@ def build_files(project_name: str) -> dict[Path, str]:
                 source.read_text(encoding="utf-8"), common
             )
 
-    for source in DOCUMENTS.glob("*.md"):
+    for spec in DOC_TYPES:
+        source = ROOT / spec.template
+        if source.parent != DOCUMENTS:
+            continue
         content = source.read_text(encoding="utf-8")
         files[Path("docs/_templates") / source.name] = content
-        starter_path, label = STARTERS[source.name]
+        if spec.starter is None:
+            continue
         starter_values = {
             **common,
             "ID": "DRAFT-" + source.stem.upper(),
-            "TITLE": "起始草稿：" + label,
+            "TITLE": "起始草稿：" + (spec.starter_label or spec.name),
             "OWNER": "待填写",
         }
-        files[Path("docs") / starter_path] = render(content, starter_values)
+        files[Path("docs") / spec.starter] = render(content, starter_values)
 
     files[Path("docs/attachments/.gitkeep")] = ""
     files[Path("docs/modules/.gitkeep")] = ""

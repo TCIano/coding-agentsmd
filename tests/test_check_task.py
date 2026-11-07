@@ -160,6 +160,14 @@ class CheckTaskTest(unittest.TestCase):
             check=False,
         )
 
+    def run_full(self) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(CHECK), str(self.project)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
     def output(self, result: subprocess.CompletedProcess[str]) -> str:
         return result.stdout + result.stderr
 
@@ -461,15 +469,106 @@ updated_at: "2026-10-26"
         self.assertIn("缺少", output)
         self.assertIn("合并检查", output)
 
-    def test_usage_missing_argument_exits_2(self) -> None:
+    def test_usage_missing_project_exits_2(self) -> None:
         result = subprocess.run(
-            [sys.executable, str(CHECK), str(self.project)],
+            [sys.executable, str(CHECK)],
             capture_output=True,
             text=True,
             check=False,
         )
         self.assertEqual(result.returncode, 2, self.output(result))
         self.assertIn("错误：", self.output(result))
+
+    def test_empty_task_id_exits_2(self) -> None:
+        result = subprocess.run(
+            [sys.executable, str(CHECK), str(self.project), "  "],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 2, self.output(result))
+        self.assertIn("任务编号不能为空", self.output(result))
+
+    def test_full_scan_passes_on_fresh_project(self) -> None:
+        self.assertTrue((self.project / "docs/index.md").exists())
+
+        result = self.run_full()
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("全部文档", output)
+        self.assertNotIn("错误：", output)
+
+    def test_full_scan_with_valid_task_record_passes(self) -> None:
+        self.write_doc("docs/tasks/TASK-001.md", task_document())
+
+        result = self.run_full()
+
+        self.assertEqual(result.returncode, 0, self.output(result))
+
+    def test_full_scan_reports_missing_frontmatter(self) -> None:
+        self.write_doc("docs/modules/notes.md", "# 随手记\n\n临时内容。\n")
+
+        result = self.run_full()
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 1, output)
+        self.assertIn("frontmatter", output)
+        self.assertIn("notes.md", output)
+
+    def test_task_scan_reports_missing_frontmatter(self) -> None:
+        self.write_doc("docs/tasks/TASK-001.md", task_document())
+        self.write_doc("docs/modules/notes.md", "# 随手记\n")
+
+        result = self.run_check()
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 1, output)
+        self.assertIn("frontmatter", output)
+
+    def test_unrelated_document_missing_field_is_error(self) -> None:
+        self.write_doc("docs/tasks/TASK-001.md", task_document())
+        self.write_doc(
+            "docs/bugs/BUG-002.md",
+            """---
+id: "BUG-002"
+type: bug
+title: "登录失败"
+document_status: 现行
+updated_at: "2026-10-26"
+---
+
+# 登录失败
+""",
+        )
+
+        result = self.run_check()
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 1, output)
+        self.assertIn("BUG-002", output)
+        self.assertIn("owner", output)
+
+    def test_full_scan_reports_unrelated_document_missing_field(self) -> None:
+        self.write_doc(
+            "docs/bugs/BUG-002.md",
+            """---
+id: "BUG-002"
+type: bug
+title: "登录失败"
+document_status: 现行
+updated_at: "2026-10-26"
+---
+
+# 登录失败
+""",
+        )
+
+        result = self.run_full()
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 1, output)
+        self.assertIn("owner", output)
 
 
     def test_verification_result_placeholder_is_error(self) -> None:
