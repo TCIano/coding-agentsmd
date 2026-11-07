@@ -18,6 +18,20 @@ python3 scripts/init_project.py /path/to/project --name "项目名称"
 
 脚本不会覆盖已有文件。它会创建基础文档、各类型的起始草稿和项目模板副本。起始草稿是待填写材料，不代表真实存在的需求、缺陷或设计决定。
 
+## 生成快照草稿
+
+在接入项目根目录已使用 Git 后运行：
+
+```sh
+# 工作接续快照，必须带任务号
+python3 scripts/make_snapshot.py /path/to/project --kind work --task TASK-001
+
+# 项目状态快照，任务号可省略
+python3 scripts/make_snapshot.py /path/to/project --kind project
+```
+
+只填代码版本、分支、未提交改动、生成时间等机器知道的信息，进度、验证结论等保持「待填写」；生成的是草稿。文件已存在不覆盖；项目未初始化或不是 Git 根目录退出 2。
+
 ## 检查文档、任务或改动影响
 
 在接入项目根目录已使用 Git 后运行：
@@ -43,4 +57,4 @@ python3 scripts/upgrade_templates.py /path/to/project [--check]
 
 脚本只比较项目的 `docs/_templates/` 与系统模板并展示差异，不覆盖项目内容；`--check` 在有差异或缺失时退出码为 1。人工合并差异后，自行更新 `docs/system.yml` 的 `system_version`。
 
-当前版本（0.4.0）提供模板、初始化脚本、任务检查和模板升级查看。0.4.0 新增 `--changed-from`：按 `document-map.yml` 的 `path` 提示改动可能影响的文档；升级前见 [框架设计](docs/framework.md) 的「0.4.0 迁移影响」。快照生成仍按框架逐步制作。
+当前版本（0.5.0）提供模板、初始化、快照草稿、任务检查和模板升级查看。0.5.0 新增 `make_snapshot.py`；项目状态快照模板正文多了一行「未提交改动」，既有项目升级前见 [框架设计](docs/framework.md) 的「0.5.0 迁移影响」。
