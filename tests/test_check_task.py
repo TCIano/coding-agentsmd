@@ -32,6 +32,22 @@ replaces: ""
 使用方为客户端。字段说明待补充。
 """
 
+def typed_doc(doc_type: str, doc_id: str, title: str) -> str:
+    return (
+        "---\n"
+        f'id: "{doc_id}"\n'
+        f"type: {doc_type}\n"
+        f'title: "{title}"\n'
+        "document_status: 现行\n"
+        'owner: "张三"\n'
+        'updated_at: "2026-10-26"\n'
+        "related_tasks: []\n"
+        'replaces: ""\n'
+        "---\n\n"
+        f"# {title}\n"
+    )
+
+
 REQUIREMENT_DOC = """---
 id: "REQ-001"
 type: requirement
@@ -155,6 +171,14 @@ class CheckTaskTest(unittest.TestCase):
     ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [sys.executable, str(CHECK), str(project or self.project), task_id],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def run_task(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(CHECK), str(self.project), "TASK-001", *arguments],
             capture_output=True,
             text=True,
             check=False,
@@ -866,6 +890,214 @@ updated_at: "2026-10-26"
         self.assertEqual(result.returncode, 0, output)
         self.assertIn("可能影响文档", output)
         self.assertNotIn("未登记", output)
+
+    def test_reconcile_updated_path_present_passes(self) -> None:
+        self.write_doc(
+            "docs/tasks/TASK-001.md",
+            task_document(
+                impact_rows=["| docs/interfaces/auth.md | 已更新 | 已更新 |"]
+            ),
+        )
+        self.commit_all()
+        auth = self.project / "docs/interfaces/auth.md"
+        auth.write_text(auth.read_text(encoding="utf-8") + "\n补充。\n", encoding="utf-8")
+
+        result = self.run_task("--changed-from", "HEAD")
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 0, output)
+        self.assertNotIn("错误：", output)
+
+    def test_reconcile_updated_path_missing_is_error(self) -> None:
+        self.write_doc(
+            "docs/interfaces/other.md",
+            INTERFACE_DOC.replace("IFACE-001", "IFACE-002").replace(
+                "登录接口", "另一个接口"
+            ),
+        )
+        self.write_doc(
+            "docs/tasks/TASK-001.md",
+            task_document(
+                impact_rows=["| docs/interfaces/other.md | 已更新 | 已更新 |"]
+            ),
+        )
+        self.commit_all()
+        auth = self.project / "docs/interfaces/auth.md"
+        auth.write_text(auth.read_text(encoding="utf-8") + "\n补充。\n", encoding="utf-8")
+
+        result = self.run_task("--changed-from", "HEAD")
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 1, output)
+        self.assertIn("docs/interfaces/other.md 不在本次改动中", output)
+        self.assertIn("ref 选早了会误报", output)
+
+    def test_reconcile_updated_type_without_directory_change_is_error(self) -> None:
+        self.write_doc(
+            "docs/tasks/TASK-001.md",
+            task_document(impact_rows=["| 接口 | 已更新 | 已更新 |"]),
+        )
+        self.commit_all()
+        readme = self.project / "README.md"
+        readme.write_text(
+            readme.read_text(encoding="utf-8") + "\n改动。\n", encoding="utf-8"
+        )
+
+        result = self.run_task("--changed-from", "HEAD")
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 1, output)
+        self.assertIn("没有任何「接口」类型的文档", output)
+
+    def test_reconcile_type_name_with_document_suffix_passes(self) -> None:
+        self.write_doc(
+            "docs/tasks/TASK-001.md",
+            task_document(impact_rows=["| 接口文档 | 已更新 | 已更新 |"]),
+        )
+        self.commit_all()
+        auth = self.project / "docs/interfaces/auth.md"
+        auth.write_text(auth.read_text(encoding="utf-8") + "\n补充。\n", encoding="utf-8")
+
+        result = self.run_task("--changed-from", "HEAD")
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 0, output)
+
+    def test_reconcile_skips_no_update_needed_rows(self) -> None:
+        self.write_doc(
+            "docs/tasks/TASK-001.md",
+            task_document(
+                impact_rows=["| 接口 | 检查后无需更新 | 行为未变 |"]
+            ),
+        )
+        self.commit_all()
+        readme = self.project / "README.md"
+        readme.write_text(
+            readme.read_text(encoding="utf-8") + "\n改动。\n", encoding="utf-8"
+        )
+
+        result = self.run_task("--changed-from", "HEAD")
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 0, output)
+        self.assertNotIn("错误：", output)
+
+    def test_reconcile_not_run_without_changed_from(self) -> None:
+        self.write_doc(
+            "docs/interfaces/other.md",
+            INTERFACE_DOC.replace("IFACE-001", "IFACE-002").replace(
+                "登录接口", "另一个接口"
+            ),
+        )
+        self.write_doc(
+            "docs/tasks/TASK-001.md",
+            task_document(
+                impact_rows=["| docs/interfaces/other.md | 已更新 | 已更新 |"]
+            ),
+        )
+
+        result = self.run_check()
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 0, output)
+
+    def test_reconcile_unknown_target_warns(self) -> None:
+        self.write_doc(
+            "docs/tasks/TASK-001.md",
+            task_document(impact_rows=["| 登录相关的东西 | 已更新 | 已更新 |"]),
+        )
+        self.commit_all()
+        readme = self.project / "README.md"
+        readme.write_text(
+            readme.read_text(encoding="utf-8") + "\n改动。\n", encoding="utf-8"
+        )
+
+        result = self.run_task("--changed-from", "HEAD")
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("无法核实", output)
+
+    def test_full_scan_with_changed_from_reports_no_reconcile(self) -> None:
+        self.write_doc(
+            "docs/tasks/TASK-001.md",
+            task_document(
+                impact_rows=["| docs/interfaces/other.md | 已更新 | 已更新 |"]
+            ),
+        )
+        self.commit_all()
+        readme = self.project / "README.md"
+        readme.write_text(
+            readme.read_text(encoding="utf-8") + "\n改动。\n", encoding="utf-8"
+        )
+
+        result = self.run_full("--changed-from", "HEAD")
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("没有核对影响判断", output)
+
+    def test_reconcile_multi_type_row_checks_each_type(self) -> None:
+        self.write_doc(
+            "docs/tasks/TASK-001.md",
+            task_document(impact_rows=["| 需求/缺陷 | 已更新 | 已更新 |"]),
+        )
+        self.commit_all()
+        readme = self.project / "README.md"
+        readme.write_text(
+            readme.read_text(encoding="utf-8") + "\n改动。\n", encoding="utf-8"
+        )
+
+        result = self.run_task("--changed-from", "HEAD")
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 1, output)
+        self.assertIn("「需求」", output)
+        self.assertIn("「缺陷」", output)
+        self.assertNotIn("不在本次改动中", output)
+
+    def test_reconcile_multi_type_row_passes_when_all_changed(self) -> None:
+        self.write_doc(
+            "docs/requirements/REQ-001.md",
+            typed_doc("requirement", "REQ-001", "登录需求"),
+        )
+        self.write_doc(
+            "docs/bugs/BUG-001.md", typed_doc("bug", "BUG-001", "登录缺陷")
+        )
+        self.write_doc(
+            "docs/tasks/TASK-001.md",
+            task_document(impact_rows=["| 需求/缺陷 | 已更新 | 已更新 |"]),
+        )
+        self.commit_all()
+        for relative in ("docs/requirements/REQ-001.md", "docs/bugs/BUG-001.md"):
+            path = self.project / relative
+            path.write_text(
+                path.read_text(encoding="utf-8") + "\n补充。\n", encoding="utf-8"
+            )
+
+        result = self.run_task("--changed-from", "HEAD")
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 0, output)
+        self.assertNotIn("错误：", output)
+
+    def test_reconcile_multi_type_with_unknown_part_warns(self) -> None:
+        self.write_doc(
+            "docs/tasks/TASK-001.md",
+            task_document(impact_rows=["| 需求/登录模块 | 已更新 | 已更新 |"]),
+        )
+        self.commit_all()
+        readme = self.project / "README.md"
+        readme.write_text(
+            readme.read_text(encoding="utf-8") + "\n改动。\n", encoding="utf-8"
+        )
+
+        result = self.run_task("--changed-from", "HEAD")
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("无法核实", output)
+        self.assertNotIn("不在本次改动中", output)
 
 if __name__ == "__main__":
     unittest.main()

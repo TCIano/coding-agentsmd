@@ -18,7 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
-from doc_types import BUILTIN_TYPES  # noqa: E402
+from doc_types import BUILTIN_TYPES, DOC_TYPES  # noqa: E402
 
 ALLOWED_DOCUMENT_STATUS = {"草稿", "现行", "已取代", "已归档"}
 REQUIRED_FIELDS = ("id", "type", "title", "document_status", "owner", "updated_at")
@@ -534,6 +534,149 @@ def check_impact_table(document: Document, lines: list[str], report: Report) -> 
             )
 
 
+def normalize_cell_text(cell: str) -> str:
+    return cell.strip().strip("`").strip()
+
+
+def looks_like_document_path(
+    cell: str,
+    document: Document,
+    project: Path,
+    changed: list[str],
+) -> bool:
+    """带链接、以 .md 结尾、或在项目里真实存在，才当作文档路径。"""
+    text = normalize_cell_text(cell)
+    if LINK_RE.search(text):
+        return True
+    if text.endswith(".md"):
+        return True
+    changed_set = set(changed)
+    for candidate in impact_path_candidates(text, document, project):
+        if candidate in changed_set or (project / candidate).exists():
+            return True
+    return False
+
+
+def type_name_parts(cell: str) -> list[str]:
+    return [
+        name
+        for name in (type_name_of(part) for part in cell.split("/"))
+        if name
+    ]
+
+
+def type_name_of(cell: str) -> str:
+    name = normalize_cell_text(cell)
+    if name.endswith("文档"):
+        name = name[: -len("文档")].strip()
+    return name
+
+
+def changed_for_type(name: str, changed: list[str]) -> bool | None:
+    """判断本次改动是否涉及某种文档类型；未知类型返回 None。"""
+    spec = next((item for item in DOC_TYPES if item.name == name), None)
+    if spec is None:
+        return None
+    if spec.starter:
+        directory = (Path("docs") / Path(spec.starter).parent).as_posix()
+        return any(
+            path == directory or path.startswith(directory + "/")
+            for path in changed
+        )
+    return any(path == "docs/CHANGELOG.md" for path in changed)
+
+
+def impact_path_candidates(
+    cell: str, document: Document, project: Path
+) -> list[str]:
+    """把影响判断里的文档写法换算成项目相对路径，供改动集合比对。"""
+    raw = normalize_cell_text(cell)
+    link = LINK_RE.search(raw)
+    if link:
+        raw = extract_link_target(link.group(1))
+    raw = unquote(raw.split("#", 1)[0].split("?", 1)[0]).strip()
+    if not raw:
+        return []
+    plain = raw.replace("\\", "/")
+    while plain.startswith("./"):
+        plain = plain[2:]
+    plain = plain.lstrip("/")
+    candidates: list[str] = [plain]
+    if raw.startswith("/"):
+        bases = [project]
+    else:
+        bases = [document.path.parent, project]
+    for base in bases:
+        try:
+            candidates.append(
+                (base / raw.lstrip("/")).resolve().relative_to(project).as_posix()
+            )
+        except (OSError, ValueError):
+            continue
+    return list(dict.fromkeys(candidates))
+
+
+def reconcile_impact_table(
+    document: Document,
+    project: Path,
+    changed: list[str],
+    revision: str,
+    report: Report,
+) -> None:
+    """核对“已更新”的说法：声明的文档或类型必须在本次改动里出现。"""
+    lines = section_lines(document.body, "文档影响判断")
+    if lines is None:
+        return
+    header, rows = parse_table(lines)
+    # 表头问题由 check_impact_table 报，这里不重复报。
+    columns = resolve_columns(
+        document, header, IMPACT_HEADERS, "文档影响判断", Report()
+    )
+    if columns is None:
+        return
+    changed_set = set(changed)
+    for row in rows:
+        if not has_any_content(row):
+            continue
+        conclusion = table_cell(row, columns[IMPACT_HEADERS[1]])
+        if conclusion != "已更新":
+            continue
+        target = table_cell(row, columns[IMPACT_HEADERS[0]])
+        if not target:
+            report.warning(
+                f"{document.relative} 的「文档影响判断」结论为“已更新”，"
+                "但没写更新的文档或类型，无法核实。"
+            )
+            continue
+        if looks_like_document_path(target, document, project, changed):
+            candidates = impact_path_candidates(target, document, project)
+            if any(path in changed_set for path in candidates):
+                continue
+            shown = candidates[0] if candidates else target
+            report.error(
+                f"{document.relative} 的「文档影响判断」写“已更新”，"
+                f"但 {shown} 不在本次改动中。"
+                f"只对比 {revision} 之后的改动，ref 选早了会误报。"
+            )
+            continue
+        names = type_name_parts(target)
+        known = [name for name in names if changed_for_type(name, changed) is not None]
+        if not names or len(known) != len(names):
+            report.warning(
+                f"{document.relative} 的「文档影响判断」第一列“{target}”"
+                "既不是文档路径，也不是已知文档类型，无法核实。"
+            )
+            continue
+        missing = [name for name in names if not changed_for_type(name, changed)]
+        if missing:
+            listed = "、".join(f"「{name}」" for name in missing)
+            report.error(
+                f"{document.relative} 的「文档影响判断」写“已更新”，"
+                f"但本次改动没有任何{listed}类型的文档。"
+                f"只对比 {revision} 之后的改动，ref 选早了会误报。"
+            )
+
+
 def check_verification_table(
     document: Document, lines: list[str], report: Report
 ) -> None:
@@ -841,13 +984,11 @@ def changed_files(project: Path, revision: str) -> list[str]:
 
 
 def hint_affected_documents(
-    project: Path,
-    revision: str,
+    changed: list[str],
     areas: list[DocumentArea],
     report: Report,
 ) -> None:
     """按对应表提示改动可能影响哪些文档；只提示，不判定。"""
-    changed = changed_files(project, revision)
     covered: set[str] = set()
     for area in areas:
         if not area.path:
@@ -960,6 +1101,10 @@ def run_checks(
         check_document_fields(document, project, all_ids, report)
         check_local_links(document, project, report)
 
+    changed: list[str] | None = None
+    if changed_from:
+        changed = changed_files(project, changed_from)
+
     if task_id is not None:
         records = [
             document
@@ -974,10 +1119,19 @@ def run_checks(
             )
         for document in records:
             check_task_change_content(document, report)
+            if changed is not None and changed_from is not None:
+                reconcile_impact_table(
+                    document, project, changed, changed_from, report
+                )
+    elif changed is not None:
+        report.warning(
+            "未指定任务号，没有核对影响判断中的“已更新”；"
+            "用任务号运行才会对账。"
+        )
 
     areas = check_document_map(project, report)
-    if changed_from and areas is not None:
-        hint_affected_documents(project, changed_from, areas, report)
+    if changed is not None and areas is not None:
+        hint_affected_documents(changed, areas, report)
 
 
 def print_report(report: Report, scope: str) -> int:
