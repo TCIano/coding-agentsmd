@@ -63,6 +63,7 @@ class Document:
     relative: Path
     meta: dict[str, str | list[str]]
     body: str
+    content: str
 
     def text(self, key: str) -> str:
         value = self.meta.get(key)
@@ -213,6 +214,7 @@ def scan_documents(project: Path, report: Report) -> list[Document]:
                 relative=relative,
                 meta=meta,
                 body=body,
+                content=text,
             )
         )
     return documents
@@ -495,6 +497,117 @@ def check_local_links(document: Document, project: Path, report: Report) -> None
             report.error(
                 f"{document.relative} 的本地 Markdown 链接目标不存在：{target}。"
             )
+
+
+# ---------------------------------------------------------------------------
+# 敏感信息扫描
+# ---------------------------------------------------------------------------
+
+# 模板和示例里的占位写法，一律放过。
+PLACEHOLDER_MARKERS = (
+    "xxx",
+    "***",
+    "your_",
+    "your-",
+    "<",
+    ">",
+    "{{",
+    "${",
+    "example",
+    "placeholder",
+    "待填写",
+)
+PLACEHOLDER_WORDS = {
+    "",
+    "无",
+    "暂无",
+    "空",
+    "none",
+    "null",
+    "nil",
+    "true",
+    "false",
+    "todo",
+    "tbd",
+}
+
+# (名称, 正则, 取值分组)。匹配到即报错，报错前打码。
+# 新增要高置信抓取的格式，就往这个元组里加一条，并在
+# tests/test_check_task.py 的敏感信息测试里补对应样例；正则别写得太宽，宁窄勿滥。
+SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str], int], ...] = (
+    (
+        "私钥块",
+        re.compile(
+            r"-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?"
+            r"-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----"
+        ),
+        0,
+    ),
+    ("AWS Access Key", re.compile(r"\bAKIA[0-9A-Z]{16}\b"), 0),
+    ("GitHub Token", re.compile(r"\bgh[po]_[A-Za-z0-9]{20,}\b"), 0),
+    ("Slack Token", re.compile(r"\bxox[a-z]-[A-Za-z0-9-]{10,}\b"), 0),
+    ("sk- 密钥", re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b"), 0),
+    (
+        "JWT",
+        re.compile(
+            r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"
+        ),
+        0,
+    ),
+    (
+        "Bearer Token",
+        re.compile(r"\bBearer[ \t]+([A-Za-z0-9\-._~+/]{24,}=*)"),
+        1,
+    ),
+)
+
+ASSIGNMENT_RE = re.compile(
+    r"\b(password|passwd|secret|api[_-]?key|apikey|token|access[_-]?key|"
+    r"client[_-]?secret)\b\s*[:=]\s*[\"'`]?([^\s\"'`]{6,})[\"'`]?",
+    re.IGNORECASE,
+)
+
+
+def is_placeholder_secret(value: str) -> bool:
+    lowered = value.strip().lower()
+    if lowered in PLACEHOLDER_WORDS:
+        return True
+    return any(marker in lowered for marker in PLACEHOLDER_MARKERS)
+
+
+def mask_secret(value: str) -> str:
+    """最多露前四位，其余打码；输出里绝不放密钥原文。"""
+    if len(value) <= 4:
+        return "*" * len(value)
+    return value[:4] + "…（已打码）"
+
+
+def scan_secrets(document: Document, report: Report) -> None:
+    content = document.content
+    flagged_lines: set[int] = set()
+    for label, pattern, group in SECRET_PATTERNS:
+        for match in pattern.finditer(content):
+            value = match.group(group)
+            if is_placeholder_secret(value):
+                continue
+            line = content.count("\n", 0, match.start(group)) + 1
+            flagged_lines.add(line)
+            report.error(
+                f"{document.relative}:{line} 发现疑似泄露（{label}）："
+                f"{mask_secret(value)}。请删除或改用占位符。"
+            )
+    for match in ASSIGNMENT_RE.finditer(content):
+        key = match.group(1)
+        value = match.group(2).rstrip(",.;；。")
+        if is_placeholder_secret(value):
+            continue
+        line = content.count("\n", 0, match.start(2)) + 1
+        if line in flagged_lines:
+            continue
+        report.warning(
+            f"{document.relative}:{line} 疑似敏感赋值（{key}）："
+            f"{mask_secret(value)}；请确认不是真实密钥。"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1100,6 +1213,18 @@ def run_checks(
     for document in documents:
         check_document_fields(document, project, all_ids, report)
         check_local_links(document, project, report)
+
+    secret_scope = (
+        documents
+        if task_id is None
+        else [
+            document
+            for document in documents
+            if is_task_related(document, task_id)
+        ]
+    )
+    for document in secret_scope:
+        scan_secrets(document, report)
 
     changed: list[str] | None = None
     if changed_from:

@@ -1099,5 +1099,181 @@ updated_at: "2026-10-26"
         self.assertIn("无法核实", output)
         self.assertNotIn("不在本次改动中", output)
 
+    def test_private_key_block_is_error_and_masked(self) -> None:
+        block = (
+            "-----BEGIN RSA PRIVATE KEY-----\n"
+            "MIIEowIBAAKCAQEAabcdefghijklmnop\n"
+            "-----END RSA PRIVATE KEY-----"
+        )
+        self.write_doc(
+            "docs/modules/notes.md",
+            typed_doc("module-doc", "MODULE-001", "随手记") + "\n" + block + "\n",
+        )
+
+        result = self.run_full()
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 1, output)
+        self.assertIn("私钥块", output)
+        self.assertNotIn("MIIEowIBAAKCAQEAabcdefghijklmnop", output)
+
+    def test_aws_key_is_error_and_masked(self) -> None:
+        secret = "AKIAZW7Q2LMNB4X9R3TV"
+        self.write_doc(
+            "docs/modules/notes.md",
+            typed_doc("module-doc", "MODULE-001", "随手记") + f"\n{secret}\n",
+        )
+
+        result = self.run_full()
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 1, output)
+        self.assertIn("AWS Access Key", output)
+        self.assertNotIn(secret, output)
+        self.assertIn("AKIA…（已打码）", output)
+
+    def test_token_formats_are_errors_and_masked(self) -> None:
+        secrets = [
+            "ghp_abcdefghijklmnopqrstuvwxyz0123",
+            "xoxb-1234567890-abcdefghij",
+            "sk-proj-abcdefghijklmnopqrstuvwx",
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.abcdefghij",
+        ]
+        self.write_doc(
+            "docs/modules/notes.md",
+            typed_doc("module-doc", "MODULE-001", "随手记")
+            + "\n"
+            + "\n".join(secrets)
+            + "\n",
+        )
+
+        result = self.run_full()
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 1, output)
+        for label in ("GitHub Token", "Slack Token", "sk- 密钥", "JWT"):
+            self.assertIn(label, output)
+        for secret in secrets:
+            self.assertNotIn(secret, output)
+
+    def test_password_assignment_only_warns_and_masked(self) -> None:
+        self.write_doc(
+            "docs/modules/notes.md",
+            typed_doc("module-doc", "MODULE-001", "随手记")
+            + '\n- password = "hunter2xyz"\n',
+        )
+
+        result = self.run_full()
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("疑似敏感赋值", output)
+        self.assertNotIn("hunter2xyz", output)
+        self.assertIn("hunt…（已打码）", output)
+
+    def test_placeholders_are_not_flagged(self) -> None:
+        placeholders = [
+            '- password = "<your-password>"',
+            "- token: xxx",
+            "- api_key: YOUR_KEY",
+            "- secret: ***",
+            "- client_secret: 待填写",
+            "- access_key: example",
+            '- password = ""',
+            "- token: {{TOKEN}}",
+        ]
+        self.write_doc(
+            "docs/modules/notes.md",
+            typed_doc("module-doc", "MODULE-001", "随手记")
+            + "\n"
+            + "\n".join(placeholders)
+            + "\n",
+        )
+
+        result = self.run_full()
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 0, output)
+        self.assertNotIn("疑似泄露", output)
+        self.assertNotIn("疑似敏感赋值", output)
+
+    def test_task_mode_scans_only_related_documents(self) -> None:
+        self.write_doc(
+            "docs/tasks/TASK-001.md", task_document()
+        )
+        self.write_doc(
+            "docs/bugs/BUG-002.md",
+            typed_doc("bug", "BUG-002", "无关缺陷") + "\nAKIAZW7Q2LMNB4X9R3TV\n",
+        )
+
+        task_result = self.run_check()
+        full_result = self.run_full()
+
+        self.assertEqual(task_result.returncode, 0, self.output(task_result))
+        self.assertNotIn("疑似泄露", self.output(task_result))
+        self.assertEqual(full_result.returncode, 1, self.output(full_result))
+        self.assertIn("疑似泄露", self.output(full_result))
+
+    def test_private_key_block_variants_are_errors(self) -> None:
+        body = "MIIEowIBAAKCAQEAabcdefghijklmnop"
+        for label in ("OPENSSH", "EC", "RSA"):
+            block = (
+                f"-----BEGIN {label} PRIVATE KEY-----\n"
+                f"{body}\n"
+                f"-----END {label} PRIVATE KEY-----"
+            )
+            self.write_doc(
+                "docs/modules/notes.md",
+                typed_doc("module-doc", "MODULE-001", "随手记")
+                + "\n"
+                + block
+                + "\n",
+            )
+
+            result = self.run_full()
+
+            output = self.output(result)
+            self.assertEqual(result.returncode, 1, f"{label}: {output}")
+            self.assertIn("私钥块", output)
+            self.assertNotIn(body, output)
+
+    def test_pgp_private_key_block_is_error(self) -> None:
+        body = "abc123def456ghi789"
+        block = (
+            "-----BEGIN PGP PRIVATE KEY BLOCK-----\n"
+            f"{body}\n"
+            "-----END PGP PRIVATE KEY BLOCK-----"
+        )
+        self.write_doc(
+            "docs/modules/notes.md",
+            typed_doc("module-doc", "MODULE-001", "随手记") + "\n" + block + "\n",
+        )
+
+        result = self.run_full()
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 1, output)
+        self.assertIn("私钥块", output)
+        self.assertNotIn(body, output)
+
+    def test_slack_xoxc_and_xoxe_are_errors(self) -> None:
+        secrets = [
+            "xoxc-1234567890-abcdefghij",
+            "xoxe-1234567890-abcdefghij",
+        ]
+        for secret in secrets:
+            self.write_doc(
+                "docs/modules/notes.md",
+                typed_doc("module-doc", "MODULE-001", "随手记")
+                + f"\n{secret}\n",
+            )
+
+            result = self.run_full()
+
+            output = self.output(result)
+            self.assertEqual(result.returncode, 1, f"{secret}: {output}")
+            self.assertIn("Slack Token", output)
+            self.assertNotIn(secret, output)
+
 if __name__ == "__main__":
     unittest.main()
