@@ -22,6 +22,23 @@ from doc_types import BUILTIN_TYPES, DOC_TYPES  # noqa: E402
 
 ALLOWED_DOCUMENT_STATUS = {"草稿", "现行", "已取代", "已归档"}
 REQUIRED_FIELDS = ("id", "type", "title", "document_status", "owner", "updated_at")
+# 常见把任务进度填进 document_status 的词，报错时给人指个路。
+TASK_PROGRESS_WORDS = {
+    "进行中",
+    "已完成",
+    "已结束",
+    "已记录",
+    "已确认",
+    "处理中",
+    "待处理",
+    "待开始",
+    "未开始",
+    "待验证",
+    "已验证",
+    "已关闭",
+    "已合并",
+    "已取消",
+}
 TASK_SECTIONS = ("改动与原因", "文档影响判断", "验证", "合并检查")
 ALLOWED_CONCLUSIONS = ("已更新", "检查后无需更新")
 IMPACT_HEADERS = (
@@ -439,10 +456,22 @@ def check_document_fields(
     if "document_status" in document.meta:
         status = document.text("document_status").strip()
         if status not in ALLOWED_DOCUMENT_STATUS:
-            report.error(
+            message = (
                 f"{document.relative} 的 document_status 非法：{status or '（空）'}；"
                 f"应为 {'、'.join(sorted(ALLOWED_DOCUMENT_STATUS))} 之一。"
             )
+            if status in TASK_PROGRESS_WORDS:
+                if document.text("type").strip() == "work-snapshot":
+                    message += (
+                        " 任务进度写在本文件的 task_status 里；"
+                        "document_status 只表示文档的有效性。"
+                    )
+                else:
+                    message += (
+                        " 任务进度写在工作接续快照的 task_status 里；"
+                        "document_status 只表示文档的有效性。"
+                    )
+            report.error(message)
         if status == "已取代":
             replaces = document.text("replaces").strip()
             if not replaces:

@@ -69,4 +69,4 @@ python3 scripts/upgrade_templates.py /path/to/project [--check]
 
 脚本只比较项目的 `docs/_templates/` 与系统模板并展示差异，不覆盖项目内容；`--check` 在有差异或缺失时退出码为 1。人工合并差异后，自行更新 `docs/system.yml` 的 `system_version`。
 
-当前版本（0.8.0）提供模板、初始化、快照草稿、CHANGELOG 候选、任务检查和模板升级查看。0.8.0 新增敏感信息扫描：高置信泄露报错、赋值式疑似值警告，输出一律打码；升级前见 [框架设计](docs/framework.md) 的「0.8.0 迁移影响」。
+当前版本（0.8.1）提供模板、初始化、快照草稿、CHANGELOG 候选、任务检查和模板升级查看。0.8.1 修正 `document_status` 非法时的提示，指向工作接续快照的 `task_status`。

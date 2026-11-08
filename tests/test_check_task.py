@@ -1275,5 +1275,58 @@ updated_at: "2026-10-26"
             self.assertIn("Slack Token", output)
             self.assertNotIn(secret, output)
 
+    def test_task_progress_word_in_document_status_hints_task_status(self) -> None:
+        for word in ("已完成", "进行中", "已记录", "已确认"):
+            self.write_doc(
+                "docs/tasks/TASK-001.md",
+                task_document(document_status=word),
+            )
+
+            result = self.run_check()
+
+            output = self.output(result)
+            self.assertEqual(result.returncode, 1, f"{word}: {output}")
+            self.assertIn("document_status 非法", output)
+            self.assertIn("工作接续快照的 task_status", output)
+            self.assertNotIn("本文件的 task_status", output)
+
+    def test_other_invalid_status_has_no_task_status_hint(self) -> None:
+        self.write_doc(
+            "docs/tasks/TASK-001.md", task_document(document_status="生效中")
+        )
+
+        result = self.run_check()
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 1, output)
+        self.assertIn("document_status 非法", output)
+        self.assertNotIn("task_status", output)
+
+    def test_work_snapshot_status_hint_points_to_its_own_field(self) -> None:
+        self.write_doc(
+            "docs/tasks/TASK-001-work-snapshot.md",
+            """---
+id: "WS-TASK-001"
+type: work-snapshot
+title: "工作接续快照：TASK-001"
+document_status: 进行中
+task_status: 进行中
+owner: "张三"
+updated_at: "2026-10-26"
+related_tasks: ["TASK-001"]
+replaces: ""
+---
+
+# 工作接续快照：TASK-001
+""",
+        )
+
+        result = self.run_full()
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 1, output)
+        self.assertIn("本文件的 task_status", output)
+        self.assertNotIn("工作接续快照的 task_status", output)
+
 if __name__ == "__main__":
     unittest.main()
