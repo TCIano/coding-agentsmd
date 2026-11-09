@@ -60,6 +60,22 @@ class InitProjectTest(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertFalse((Path(directory) / "docs").exists())
 
+    def test_rendered_files_have_no_unreplaced_placeholders(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            subprocess.run(["git", "init", "-q", str(target)], check=True)
+
+            result = self.run_init(target)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for path in target.rglob("*"):
+                if not path.is_file() or ".git" in path.parts:
+                    continue
+                relative = path.relative_to(target)
+                if relative.parts[:2] == ("docs", "_templates"):
+                    continue
+                self.assertNotIn("{{", path.read_text(encoding="utf-8"), relative)
+
 
 if __name__ == "__main__":
     unittest.main()

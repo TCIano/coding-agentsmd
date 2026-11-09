@@ -294,8 +294,27 @@ class CheckTaskTest(unittest.TestCase):
         output = self.output(result)
         self.assertEqual(result.returncode, 0, output)
         self.assertIn("警告：", output)
-        self.assertIn("upgrade_templates.py", output)
+        self.assertIn("高于", output)
         self.assertIn("通过：", output)
+
+    def test_older_system_version_points_to_upgrade(self) -> None:
+        self.write_doc("docs/tasks/TASK-001.md", task_document())
+        system = self.project / "docs/system.yml"
+        content = system.read_text(encoding="utf-8")
+        content = re.sub(
+            r'system_version:\s*".*?"',
+            'system_version: "0.0.1"',
+            content,
+            count=1,
+        )
+        system.write_text(content, encoding="utf-8")
+
+        result = self.run_check()
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("低于", output)
+        self.assertIn("upgrade_templates.py", output)
 
     def test_project_that_is_not_git_root_exits_2(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -756,6 +775,19 @@ updated_at: "2026-10-26"
         self.assertEqual(result.returncode, 0, output)
         self.assertIn("未登记", output)
         self.assertIn("src/other/new.py", output)
+
+    def test_docs_changes_are_not_reported_as_unregistered(self) -> None:
+        self.write_doc("docs/tasks/TASK-001.md", task_document())
+        self.commit_all()
+        self.write_doc(
+            "docs/interfaces/auth.md", INTERFACE_DOC + "\n补充字段说明。\n"
+        )
+
+        result = self.run_full("--changed-from", "HEAD")
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 0, output)
+        self.assertNotIn("未登记", output)
 
     def test_directory_area_does_not_match_sibling_prefix(self) -> None:
         tracked = self.project / "src/login/app.py"
@@ -1327,6 +1359,118 @@ replaces: ""
         self.assertEqual(result.returncode, 1, output)
         self.assertIn("本文件的 task_status", output)
         self.assertNotIn("工作接续快照的 task_status", output)
+
+    def test_table_separator_with_short_dashes_is_not_a_data_row(self) -> None:
+        content = task_document().replace("| --- | --- | --- |", "|:--|:--|:--|")
+        self.write_doc("docs/tasks/TASK-001.md", content)
+
+        result = self.run_check()
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 0, output)
+        self.assertNotIn("结论非法", output)
+
+    def test_env_style_secret_assignment_warns(self) -> None:
+        self.write_doc(
+            "docs/modules/notes.md",
+            typed_doc("module-doc", "MODULE-001", "随手记")
+            + "\n- DB_PASSWORD=hunter2xyz\n- AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIpl0k\n",
+        )
+
+        result = self.run_full()
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("疑似敏感赋值", output)
+        self.assertNotIn("hunter2xyz", output)
+
+    def test_project_relative_link_is_accepted(self) -> None:
+        rows = [
+            "| docs/interfaces/auth.md | 已更新 | [接口文档](docs/interfaces/auth.md) |",
+            "| 需求 | 检查后无需更新 | 行为未变 |",
+        ]
+        self.write_doc("docs/tasks/TASK-001.md", task_document(impact_rows=rows))
+
+        result = self.run_check()
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 0, output)
+        self.assertNotIn("链接目标不存在", output)
+
+    def test_inline_code_link_example_is_not_checked(self) -> None:
+        self.write_doc(
+            "docs/interfaces/auth.md",
+            INTERFACE_DOC + '\n写法：`[示例](not-there.md)`。\n',
+        )
+
+        result = self.run_full()
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 0, output)
+        self.assertNotIn("not-there.md", output)
+
+    def test_invalid_calendar_date_is_error(self) -> None:
+        self.write_doc(
+            "docs/tasks/TASK-001.md", task_document(updated_at="2026-02-30")
+        )
+
+        result = self.run_check()
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 1, output)
+        self.assertIn("有效日期", output)
+
+    def test_impact_row_marked_updated_without_target_warns(self) -> None:
+        rows = [
+            "|  | 已更新 | 已更新 |",
+            "| 需求 | 检查后无需更新 | 行为未变 |",
+        ]
+        self.write_doc("docs/tasks/TASK-001.md", task_document(impact_rows=rows))
+
+        result = self.run_check()
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("没写更新的文档或类型", output)
+
+    def test_dangling_related_tasks_warns_without_failure(self) -> None:
+        self.write_doc(
+            "docs/requirements/login.md",
+            typed_doc("requirement", "REQ-001", "登录需求").replace(
+                'related_tasks: []', 'related_tasks: ["TASK-999"]'
+            ),
+        )
+        self.write_doc("docs/tasks/TASK-001.md", task_document())
+
+        result = self.run_full()
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("TASK-999", output)
+        self.assertIn("related_tasks", output)
+
+    def test_work_snapshot_may_precede_its_task_record(self) -> None:
+        snapshot = (
+            "---\n"
+            'id: "WS-TASK-001"\n'
+            "type: work-snapshot\n"
+            'title: "工作接续快照：TASK-001"\n'
+            "document_status: 草稿\n"
+            "task_status: 进行中\n"
+            'owner: "张三"\n'
+            'updated_at: "2026-11-09"\n'
+            'related_tasks: ["TASK-001"]\n'
+            'replaces: ""\n'
+            "---\n\n"
+            "# 工作接续快照：TASK-001\n"
+        )
+        self.write_doc("docs/tasks/TASK-001-work-snapshot.md", snapshot)
+
+        result = self.run_full()
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 0, output)
+        self.assertNotIn("不存在的任务编号", output)
 
 if __name__ == "__main__":
     unittest.main()

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 import re
 import shutil
@@ -40,6 +41,8 @@ TASK_PROGRESS_WORDS = {
     "已取消",
 }
 TASK_SECTIONS = ("改动与原因", "文档影响判断", "验证", "合并检查")
+# 快照可能先于任务记录存在，不对它们的 related_tasks 报缺失。
+SNAPSHOT_TYPES = {"work-snapshot", "project-snapshot"}
 ALLOWED_CONCLUSIONS = ("已更新", "检查后无需更新")
 IMPACT_HEADERS = (
     "文档类型或具体文件",
@@ -56,7 +59,12 @@ VERIFICATION_HEADERS = (
 
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 LINK_RE = re.compile(r"!?\[[^\]]*\]\(([^)]*)\)")
-SEPARATOR_CELL_RE = re.compile(r"^:?-{3,}:?$")
+# 行内代码里的链接写法只是举例，不参与本地链接检查。
+INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
+# 表格分隔行至少一个短横，与 CommonMark/GFM 一致；:-- 一类写法也认得。
+SEPARATOR_CELL_RE = re.compile(r"^:?-+:?$")
+# docs/ 下是文档本身，不是代码区域，不列入「未登记在对应表」的提示。
+DOCS_PREFIX = "docs/"
 FRONTMATTER_KEY_RE = re.compile(r"^([A-Za-z0-9_-]+):\s*(.*)$")
 HEADING_RE = re.compile(r"^(#{1,2})\s+(.+?)\s*$")
 
@@ -251,8 +259,8 @@ def section_lines(body: str, name: str) -> list[str] | None:
 
     end = len(lines)
     for index in range(start, len(lines)):
-        heading = HEADING_RE.match(lines[index].strip())
-        if heading and len(heading.group(1)) <= 2:
+        # HEADING_RE 只认一级和二级标题，下级小节不影响本节的结束位置。
+        if HEADING_RE.match(lines[index].strip()):
             end = index
             break
     return lines[start:end]
@@ -296,7 +304,7 @@ def has_any_content(cells: list[str]) -> bool:
 
 
 def normalize_header(cell: str) -> str:
-    return cell.strip().replace(" ", "").replace("*", "")
+    return cell.strip().replace(" ", "").replace("*", "").replace("`", "")
 
 
 def resolve_columns(
@@ -366,6 +374,13 @@ def read_system_version(project: Path) -> str | None:
     return None
 
 
+def version_tuple(value: str) -> tuple[int, ...] | None:
+    parts = value.split(".")
+    if not all(part.isdigit() for part in parts):
+        return None
+    return tuple(int(part) for part in parts)
+
+
 def check_version(project: Path, report: Report) -> None:
     repo_version = read_repo_version()
     if not repo_version:
@@ -377,11 +392,21 @@ def check_version(project: Path, report: Report) -> None:
             "无法从 docs/system.yml 读取 system_version，已跳过模板版本比较。"
         )
         return
-    if project_version != repo_version:
+    if project_version == repo_version:
+        return
+    project_tuple = version_tuple(project_version)
+    repo_tuple = version_tuple(repo_version)
+    if project_tuple is not None and repo_tuple is not None and project_tuple > repo_tuple:
         report.warning(
-            f"项目模板版本 {project_version} 与本仓库 VERSION {repo_version} 不同；"
-            "可用 scripts/upgrade_templates.py 查看差异（版本较旧不单独构成失败）。"
+            f"项目模板版本 {project_version} 高于本仓库 VERSION {repo_version}；"
+            "本仓库的模板与检查规则可能落后于该项目，请先核对两者的差异，"
+            "不要用旧版覆盖项目。"
         )
+        return
+    report.warning(
+        f"项目模板版本 {project_version} 低于本仓库 VERSION {repo_version}；"
+        "可用 scripts/upgrade_templates.py 查看差异（版本较旧不单独构成失败）。"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -493,6 +518,19 @@ def check_document_fields(
                 f"{document.relative} 的 updated_at 不是 YYYY-MM-DD 格式："
                 f"{updated_at or '（空）'}。"
             )
+        elif not is_real_date(updated_at):
+            report.error(
+                f"{document.relative} 的 updated_at 不是有效日期：{updated_at}。"
+            )
+
+
+def is_real_date(value: str) -> bool:
+    """格式已是 YYYY-MM-DD，再确认日历上真有这一天。"""
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
 
 
 
@@ -505,27 +543,33 @@ def extract_link_target(raw: str) -> str:
 
 
 def check_local_links(document: Document, project: Path, report: Report) -> None:
-    body = strip_fenced_code(document.body)
+    body = INLINE_CODE_RE.sub("", strip_fenced_code(document.body))
     for match in LINK_RE.finditer(body):
         target = extract_link_target(match.group(1))
         if not target or "{{" in target:
             continue
-        lowered = target.lower()
-        if lowered.startswith(("http://", "https://", "mailto:", "#")):
-            continue
-        if target.startswith("#"):
+        if target.lower().startswith(("http://", "https://", "mailto:", "#")):
             continue
         path_part = unquote(target.split("#", 1)[0].split("?", 1)[0]).strip()
         if not path_part:
             continue
-        if path_part.startswith("/"):
-            destination = project / path_part.lstrip("/")
-        else:
-            destination = document.path.parent / path_part
-        if not destination.exists():
-            report.error(
-                f"{document.relative} 的本地 Markdown 链接目标不存在：{target}。"
-            )
+        if link_target_exists(document, project, path_part):
+            continue
+        report.error(
+            f"{document.relative} 的本地 Markdown 链接目标不存在：{target}；"
+            "按文档所在目录和项目根目录都没找到。"
+        )
+
+
+def link_target_exists(document: Document, project: Path, path_part: str) -> bool:
+    """链接先按文档所在目录解析；不含 .. 时再按项目根目录解析。"""
+    if path_part.startswith("/"):
+        return (project / path_part.lstrip("/")).exists()
+    if (document.path.parent / path_part).exists():
+        return True
+    if ".." in Path(path_part).parts:
+        return False
+    return (project / path_part).exists()
 
 
 # ---------------------------------------------------------------------------
@@ -590,9 +634,11 @@ SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str], int], ...] = (
     ),
 )
 
+# 键名前用 (?<![A-Za-z0-9]) 而不是 \b：DB_PASSWORD、AWS_SECRET_ACCESS_KEY
+# 这类带下划线前缀的环境变量也能命中；后面的 \b 仍然挡住 tokenizer 之类的词尾。
 ASSIGNMENT_RE = re.compile(
-    r"\b(password|passwd|secret|api[_-]?key|apikey|token|access[_-]?key|"
-    r"client[_-]?secret)\b\s*[:=]\s*[\"'`]?([^\s\"'`]{6,})[\"'`]?",
+    r"(?<![A-Za-z0-9])(password|passwd|secret|api[_-]?key|apikey|token|"
+    r"access[_-]?key|client[_-]?secret)\b\s*[:=]\s*[\"'`]?([^\s\"'`]{6,})[\"'`]?",
     re.IGNORECASE,
 )
 
@@ -656,9 +702,11 @@ def check_impact_table(document: Document, lines: list[str], report: Report) -> 
     if columns is None:
         return
     conclusion_index = columns[IMPACT_HEADERS[1]]
+    target_index = columns[IMPACT_HEADERS[0]]
     reason_index = columns[IMPACT_HEADERS[2]]
     for row in data_rows:
         conclusion = table_cell(row, conclusion_index)
+        target = table_cell(row, target_index)
         reason = table_cell(row, reason_index)
         if conclusion in ("待填写", ""):
             report.error(
@@ -668,6 +716,11 @@ def check_impact_table(document: Document, lines: list[str], report: Report) -> 
             report.error(
                 f"{document.relative} 的「文档影响判断」结论非法：{conclusion}；"
                 "应为“已更新”或“检查后无需更新”。"
+            )
+        elif conclusion == "已更新" and not target:
+            report.warning(
+                f"{document.relative} 的「文档影响判断」结论为“已更新”，"
+                "但没写更新的文档或类型，无法核实。"
             )
         elif conclusion == "检查后无需更新" and reason in ("", "待填写"):
             report.warning(
@@ -785,10 +838,7 @@ def reconcile_impact_table(
             continue
         target = table_cell(row, columns[IMPACT_HEADERS[0]])
         if not target:
-            report.warning(
-                f"{document.relative} 的「文档影响判断」结论为“已更新”，"
-                "但没写更新的文档或类型，无法核实。"
-            )
+            # 空目标已由 check_impact_table 警告，这里不重复报。
             continue
         if looks_like_document_path(target, document, project, changed):
             candidates = impact_path_candidates(target, document, project)
@@ -1150,7 +1200,11 @@ def hint_affected_documents(
         report.warning(
             f"改动命中区域 {area.path}，可能影响文档：{'、'.join(docs)}。"
         )
-    unregistered = [path for path in changed if path not in covered]
+    unregistered = [
+        path
+        for path in changed
+        if path not in covered and not path.startswith(DOCS_PREFIX)
+    ]
     if unregistered:
         report.warning(
             "改动的文件未登记在 docs/document-map.yml 的区域中，建议补充 path 与 docs："
@@ -1225,6 +1279,31 @@ def check_custom_types(documents: list[Document], report: Report) -> None:
         )
 
 
+def check_related_tasks(
+    documents: list[Document],
+    all_ids: dict[str, list[Document]],
+    report: Report,
+) -> None:
+    """related_tasks 要指向实际存在的任务编号；只警告，不阻止。
+
+    任务编号在项目内会出现在任务变更记录的 id 和各文档的 related_tasks 里，
+    这里只要求至少有一份文档以它为 id，挡住拼写错误和已删除的任务。
+    快照除外：工作接续快照本就可能先于任务变更记录出现。
+    """
+    reported: set[str] = set()
+    for document in documents:
+        if document.text("type").strip() in SNAPSHOT_TYPES:
+            continue
+        for task_id in document.items("related_tasks"):
+            if task_id in all_ids or task_id in reported:
+                continue
+            reported.add(task_id)
+            report.warning(
+                f"{document.relative} 的 related_tasks 指向不存在的任务编号："
+                f"{task_id}；项目内没有以它为 id 的文档，核对是否拼写错误。"
+            )
+
+
 def run_checks(
     project: Path,
     task_id: str | None,
@@ -1237,6 +1316,7 @@ def run_checks(
 
     check_duplicate_ids(documents, report)
     check_custom_types(documents, report)
+    check_related_tasks(documents, all_ids, report)
 
     # 字段和链接对所有正式文档生效，不只对任务相关文档生效。
     for document in documents:

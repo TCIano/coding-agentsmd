@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from datetime import date
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -18,6 +19,7 @@ VERSION = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
 if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
 
+# STARTERS 只供 tests/test_contract.py 核对类型表，不要在脚本里删掉。
 from doc_types import DOC_TYPES, STARTERS  # noqa: E402
 
 
@@ -82,10 +84,25 @@ def main() -> int:
     project = args.project.resolve()
     if not project.is_dir():
         parser.error(f"目标目录不存在：{project}")
+    if not shutil.which("git"):
+        parser.error("未找到 git 命令，无法确认目标目录是 Git 项目根目录。")
     if git_root(project) != project:
         parser.error(f"目标目录必须是 Git 项目根目录：{project}")
 
     files = build_files(args.name)
+    # docs/_templates/ 是模板副本，本来就带 {{...}} 占位符；其余文件渲染后不应再有。
+    leftovers = [
+        f"{path}：{line.strip()}"
+        for path, content in files.items()
+        if path.parts[:2] != ("docs", "_templates")
+        for line in content.splitlines()
+        if "{{" in line
+    ]
+    if leftovers:
+        parser.error(
+            "模板渲染后仍有未替换的占位符，未写入任何文件：\n"
+            + "\n".join(leftovers)
+        )
     collisions = [str(project / path) for path in files if (project / path).exists()]
     if collisions:
         parser.error("以下文件已存在，未写入任何文件：\n" + "\n".join(collisions))

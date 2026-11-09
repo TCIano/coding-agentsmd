@@ -7,6 +7,7 @@ import argparse
 import difflib
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 
@@ -66,6 +67,9 @@ def main() -> int:
     project = args.project.resolve()
     if not project.is_dir():
         print(f"错误：项目目录不存在：{project}", file=sys.stderr)
+        return 2
+    if not shutil.which("git"):
+        print("错误：未找到 git 命令，无法确认项目是否为 Git 根目录。", file=sys.stderr)
         return 2
     if git_root(project) != project:
         print(f"错误：目标目录必须是 Git 项目根目录：{project}", file=sys.stderr)
