@@ -42,7 +42,7 @@ TASK_PROGRESS_WORDS = {
 }
 TASK_SECTIONS = ("改动与原因", "文档影响判断", "验证", "合并检查")
 # 快照可能先于任务记录存在，不对它们的 related_tasks 报缺失。
-SNAPSHOT_TYPES = {"work-snapshot", "project-snapshot"}
+SNAPSHOT_TYPES = frozenset(spec.type for spec in DOC_TYPES if spec.is_snapshot)
 ALLOWED_CONCLUSIONS = ("已更新", "检查后无需更新")
 IMPACT_HEADERS = (
     "文档类型或具体文件",
@@ -61,8 +61,9 @@ DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 LINK_RE = re.compile(r"!?\[[^\]]*\]\(([^)]*)\)")
 # 行内代码里的链接写法只是举例，不参与本地链接检查。
 INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
-# 表格分隔行至少一个短横，与 CommonMark/GFM 一致；:-- 一类写法也认得。
-SEPARATOR_CELL_RE = re.compile(r"^:?-+:?$")
+# 表头后的分隔行允许短横；其余分隔行沿用至少 3 个短横的旧判定。
+SEPARATOR_CELL_RE = re.compile(r"^:?-{3,}:?$")
+SHORT_SEPARATOR_CELL_RE = re.compile(r"^:?-+:?$")
 # docs/ 下是文档本身，不是代码区域，不列入「未登记在对应表」的提示。
 DOCS_PREFIX = "docs/"
 FRONTMATTER_KEY_RE = re.compile(r"^([A-Za-z0-9_-]+):\s*(.*)$")
@@ -275,20 +276,29 @@ def split_table_row(line: str) -> list[str]:
     return [cell.strip() for cell in row.split("|")]
 
 
-def is_separator_row(cells: list[str]) -> bool:
-    return bool(cells) and all(SEPARATOR_CELL_RE.match(cell) for cell in cells)
+def is_separator_row(cells: list[str], *, allow_short: bool = False) -> bool:
+    pattern = SHORT_SEPARATOR_CELL_RE if allow_short else SEPARATOR_CELL_RE
+    return bool(cells) and all(pattern.match(cell) for cell in cells)
 
 
 def parse_table(lines: list[str]) -> tuple[list[str] | None, list[list[str]]]:
     """解析小节中的第一张 Markdown 表格，返回 (表头, 数据行)。"""
     header: list[str] | None = None
     rows: list[list[str]] = []
+    separator_pending = False
     for raw in lines:
         stripped = raw.strip()
         if stripped.startswith("|"):
             cells = split_table_row(stripped)
             if header is None:
                 header = cells
+                separator_pending = True
+            elif separator_pending:
+                if is_separator_row(cells, allow_short=True):
+                    separator_pending = False
+                    continue
+                rows.append(cells)
+                separator_pending = False
             elif is_separator_row(cells):
                 continue
             else:
@@ -396,7 +406,18 @@ def check_version(project: Path, report: Report) -> None:
         return
     project_tuple = version_tuple(project_version)
     repo_tuple = version_tuple(repo_version)
-    if project_tuple is not None and repo_tuple is not None and project_tuple > repo_tuple:
+    if (
+        project_tuple is None
+        or repo_tuple is None
+        or len(project_tuple) != len(repo_tuple)
+        or project_tuple == repo_tuple
+    ):
+        report.warning(
+            f"项目模板版本 {project_version} 与本仓库 VERSION {repo_version} 不同，"
+            "无法比较方向；请先核对两者的差异。"
+        )
+        return
+    if project_tuple > repo_tuple:
         report.warning(
             f"项目模板版本 {project_version} 高于本仓库 VERSION {repo_version}；"
             "本仓库的模板与检查规则可能落后于该项目，请先核对两者的差异，"
@@ -555,9 +576,14 @@ def check_local_links(document: Document, project: Path, report: Report) -> None
             continue
         if link_target_exists(document, project, path_part):
             continue
+        if path_part.startswith("/"):
+            resolution = "按项目根目录解析后仍未找到"
+        elif ".." in Path(path_part).parts:
+            resolution = "按文档所在目录解析后仍未找到"
+        else:
+            resolution = "按文档所在目录和项目根目录解析后仍未找到"
         report.error(
-            f"{document.relative} 的本地 Markdown 链接目标不存在：{target}；"
-            "按文档所在目录和项目根目录都没找到。"
+            f"{document.relative} 的本地 Markdown 链接目标不存在：{target}；{resolution}。"
         )
 
 
@@ -1287,21 +1313,38 @@ def check_related_tasks(
     """related_tasks 要指向实际存在的任务编号；只警告，不阻止。
 
     任务编号在项目内会出现在任务变更记录的 id 和各文档的 related_tasks 里，
-    这里只要求至少有一份文档以它为 id，挡住拼写错误和已删除的任务。
-    快照除外：工作接续快照本就可能先于任务变更记录出现。
+    只接受 id 对应任务变更记录的编号，挡住拼写错误、非任务文档 id 和已删除任务。
+    草稿与快照除外：任务记录尚未建立时它们可能先出现。
     """
     reported: set[str] = set()
     for document in documents:
-        if document.text("type").strip() in SNAPSHOT_TYPES:
+        if (
+            document.text("type").strip() in SNAPSHOT_TYPES
+            or document.text("document_status").strip() == "草稿"
+        ):
             continue
         for task_id in document.items("related_tasks"):
-            if task_id in all_ids or task_id in reported:
+            if task_id in reported:
+                continue
+            task_documents = all_ids.get(task_id, [])
+            has_task_record = any(
+                item.text("type").strip() == "task-change"
+                for item in task_documents
+            )
+            if has_task_record:
                 continue
             reported.add(task_id)
-            report.warning(
-                f"{document.relative} 的 related_tasks 指向不存在的任务编号："
-                f"{task_id}；项目内没有以它为 id 的文档，核对是否拼写错误。"
-            )
+            if task_documents:
+                report.warning(
+                    f"{document.relative} 的 related_tasks 指向的“{task_id}”"
+                    "不是任务编号："
+                    "项目内虽有同 id 文档，但没有对应的任务变更记录。"
+                )
+            else:
+                report.warning(
+                    f"{document.relative} 的 related_tasks 指向不存在的任务编号："
+                    f"{task_id}；项目内没有以它为 id 的任务变更记录，核对是否拼写错误。"
+                )
 
 
 def run_checks(

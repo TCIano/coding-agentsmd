@@ -316,6 +316,45 @@ class CheckTaskTest(unittest.TestCase):
         self.assertIn("低于", output)
         self.assertIn("upgrade_templates.py", output)
 
+    def test_uncomparable_system_version_uses_neutral_warning(self) -> None:
+        self.write_doc("docs/tasks/TASK-001.md", task_document())
+        system = self.project / "docs/system.yml"
+        content = system.read_text(encoding="utf-8")
+        content = re.sub(
+            r'system_version:\s*".*?"',
+            'system_version: "0.9.0-rc1"',
+            content,
+            count=1,
+        )
+        system.write_text(content, encoding="utf-8")
+
+        result = self.run_check()
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("无法比较方向", output)
+        self.assertNotIn("高于", output)
+        self.assertNotIn("低于", output)
+
+    def test_different_version_component_counts_use_neutral_warning(self) -> None:
+        self.write_doc("docs/tasks/TASK-001.md", task_document())
+        system = self.project / "docs/system.yml"
+        content = system.read_text(encoding="utf-8")
+        content = re.sub(
+            r'system_version:\s*".*?"',
+            'system_version: "0.9"',
+            content,
+            count=1,
+        )
+        system.write_text(content, encoding="utf-8")
+
+        result = self.run_check()
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("无法比较方向", output)
+        self.assertNotIn("低于", output)
+
     def test_project_that_is_not_git_root_exits_2(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             result = self.run_check(project=Path(directory))
@@ -706,6 +745,19 @@ updated_at: "2026-10-26"
         self.assertEqual(result.returncode, 1, output)
         self.assertIn("表头", output)
         self.assertIn("结论", output)
+
+    def test_impact_header_accepts_inline_code_wrapping(self) -> None:
+        content = task_document().replace(
+            "结论（已更新／检查后无需更新）",
+            "`结论（已更新／检查后无需更新）`",
+        )
+        self.write_doc("docs/tasks/TASK-001.md", content)
+
+        result = self.run_check()
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 0, output)
+        self.assertNotIn("表头缺少列", output)
 
     def test_required_field_empty_string_is_error(self) -> None:
         self.write_doc("docs/tasks/TASK-001.md", task_document(owner=""))
@@ -1370,6 +1422,23 @@ replaces: ""
         self.assertEqual(result.returncode, 0, output)
         self.assertNotIn("结论非法", output)
 
+    def test_short_dash_data_row_after_separator_is_validated(self) -> None:
+        self.write_doc(
+            "docs/tasks/TASK-001.md",
+            task_document(
+                impact_rows=[
+                    "| - | - | - |",
+                    "| 需求 | 检查后无需更新 | 行为未变 |",
+                ]
+            ),
+        )
+
+        result = self.run_check()
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 1, output)
+        self.assertIn("结论非法：-", output)
+
     def test_env_style_secret_assignment_warns(self) -> None:
         self.write_doc(
             "docs/modules/notes.md",
@@ -1448,6 +1517,50 @@ replaces: ""
         self.assertEqual(result.returncode, 0, output)
         self.assertIn("TASK-999", output)
         self.assertIn("related_tasks", output)
+
+    def test_draft_document_may_precede_its_task_record(self) -> None:
+        draft = typed_doc("requirement", "REQ-001", "待完善需求").replace(
+            "document_status: 现行", "document_status: 草稿"
+        ).replace('related_tasks: []', 'related_tasks: ["TASK-999"]')
+        self.write_doc("docs/requirements/draft.md", draft)
+        self.write_doc("docs/tasks/TASK-001.md", task_document())
+
+        result = self.run_full()
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 0, output)
+        self.assertNotIn("TASK-999", output)
+
+    def test_related_task_id_must_refer_to_task_change_document(self) -> None:
+        requirement = typed_doc("requirement", "REQ-001", "登录需求")
+        self.write_doc(
+            "docs/interfaces/auth.md",
+            INTERFACE_DOC.replace(
+                'related_tasks: []', 'related_tasks: ["REQ-001"]'
+            ),
+        )
+        self.write_doc("docs/requirements/req.md", requirement)
+        self.write_doc("docs/tasks/TASK-001.md", task_document())
+
+        result = self.run_full()
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("不是任务编号", output)
+        self.assertIn("REQ-001", output)
+
+    def test_absolute_link_error_names_project_root_resolution(self) -> None:
+        self.write_doc(
+            "docs/interfaces/auth.md",
+            INTERFACE_DOC + "\n[缺失链接](/does-not-exist.md)\n",
+        )
+
+        result = self.run_full()
+
+        output = self.output(result)
+        self.assertEqual(result.returncode, 1, output)
+        self.assertIn("按项目根目录解析后仍未找到", output)
+        self.assertNotIn("按文档所在目录和项目根目录解析", output)
 
     def test_work_snapshot_may_precede_its_task_record(self) -> None:
         snapshot = (
