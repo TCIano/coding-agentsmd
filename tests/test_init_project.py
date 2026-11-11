@@ -1,13 +1,30 @@
 from pathlib import Path
+import importlib.util
+import io
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "init_project.py"
 VERSION = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+
+
+def load_init_module():
+    spec = importlib.util.spec_from_file_location("init_project_under_test", SCRIPT)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"无法加载初始化脚本：{SCRIPT}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+INIT_MODULE = load_init_module()
 
 
 class InitProjectTest(unittest.TestCase):
@@ -75,6 +92,31 @@ class InitProjectTest(unittest.TestCase):
                 if relative.parts[:2] == ("docs", "_templates"):
                     continue
                 self.assertNotIn("{{", path.read_text(encoding="utf-8"), relative)
+
+    def test_unreplaced_placeholder_exits_2_without_writing_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            subprocess.run(["git", "init", "-q", str(target)], check=True)
+            stderr = io.StringIO()
+            with (
+                patch.object(
+                    INIT_MODULE,
+                    "build_files",
+                    return_value={Path("README.md"): "{{UNRESOLVED}}"},
+                ),
+                patch.object(
+                    sys,
+                    "argv",
+                    [str(SCRIPT), str(target), "--name", "示例项目"],
+                ),
+                redirect_stderr(stderr),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                INIT_MODULE.main()
+
+            self.assertEqual(raised.exception.code, 2)
+            self.assertIn("未写入任何文件", stderr.getvalue())
+            self.assertEqual({path.name for path in target.iterdir()}, {".git"})
 
 
 if __name__ == "__main__":

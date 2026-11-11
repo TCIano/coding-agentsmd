@@ -221,6 +221,10 @@ class DocTypesContractTest(unittest.TestCase):
         table_types = {spec.type for spec in DOC_TYPES.DOC_TYPES}
         self.assertEqual(set(CHECK.BUILTIN_TYPES), table_types)
         self.assertEqual(INIT.STARTERS, DOC_TYPES.STARTERS)
+        self.assertEqual(
+            CHECK.SNAPSHOT_TYPES,
+            frozenset(spec.type for spec in DOC_TYPES.DOC_TYPES if spec.is_snapshot),
+        )
 
     def test_framework_table_matches_table(self) -> None:
         expected = [

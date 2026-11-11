@@ -20,6 +20,7 @@ class DocumentType:
     template: str  # 相对仓库根目录的模板路径
     starter: str | None = None  # 起始草稿相对接入项目 docs/ 的路径
     starter_label: str | None = None  # 起始草稿标题里的中文标签
+    is_snapshot: bool = False  # 快照可先于任务变更记录存在
 
 
 DOC_TYPES: tuple[DocumentType, ...] = (
@@ -64,6 +65,7 @@ DOC_TYPES: tuple[DocumentType, ...] = (
         "templates/documents/work-snapshot.md",
         "tasks/_work-snapshot-draft.md",
         "工作接续快照",
+        True,
     ),
     DocumentType(
         "项目状态快照",
@@ -71,6 +73,7 @@ DOC_TYPES: tuple[DocumentType, ...] = (
         "templates/documents/project-snapshot.md",
         "snapshots/_draft.md",
         "项目状态快照",
+        True,
     ),
     DocumentType(
         "项目变更记录",
